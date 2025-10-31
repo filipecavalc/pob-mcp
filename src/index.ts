@@ -8,13 +8,13 @@ import {
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { XMLParser } from "fast-xml-parser";
-import fs from "fs/promises";
 import path from "path";
 import os from "os";
-import chokidar from "chokidar";
+import fs from "fs/promises";
 import https from "https";
+import chokidar from "chokidar";
 import { PoBLuaApiClient, PoBLuaTcpClient } from "./pobLuaBridge.js";
+import { XMLParser } from "fast-xml-parser";
 import { analyzeDefenses, formatDefensiveAnalysis } from "./defensiveAnalyzer.js";
 import {
   type NodeScore,
@@ -40,154 +40,45 @@ import {
   parseOptimizationGoal,
 } from "./treeOptimizer.js";
 
-// Passive Tree Data Interfaces
-interface PassiveTreeNode {
-  skill: number;
-  name?: string;
-  icon?: string;
-  stats?: string[];
-  isKeystone?: boolean;
-  isNotable?: boolean;
-  isMastery?: boolean;
-  isJewelSocket?: boolean;
-  isAscendancyStart?: boolean;
-  ascendancyName?: string;
-  group?: number;
-  orbit?: number;
-  orbitIndex?: number;
-  out?: string[];
-  in?: string[];
-  reminderText?: string[];
-  flavourText?: string[];
-}
+// Import services
+import { BuildService } from "./services/buildService.js";
+import { TreeService } from "./services/treeService.js";
+import { WatchService } from "./services/watchService.js";
 
-interface PassiveTreeData {
-  nodes: Map<string, PassiveTreeNode>;
-  version: string;
-  classes?: any[];
-  groups?: any[];
-}
+// Import types
+import type {
+  PassiveTreeNode,
+  PassiveTreeData,
+  PoBBuild,
+  TreeAnalysisResult,
+  TreeComparison,
+  AllocationChange,
+  PathOptimization,
+  EfficiencyScore,
+  OptimizationSuggestion,
+  TreeDataCache,
+  CachedBuild,
+} from "./types.js";
 
-interface TreeDataCache {
-  data: PassiveTreeData;
-  timestamp: number;
-}
-
-// Path of Building build interface
-interface PoBBuild {
-  Build?: {
-    level?: string;
-    className?: string;
-    ascendClassName?: string;
-    PlayerStat?: Array<{stat: string; value: string}> | {stat: string; value: string};
-  };
-  Tree?: {
-    Spec?: {
-      title?: string;
-      URL?: string;
-      nodes?: string;
-      treeVersion?: string;
-    };
-  };
-  Skills?: {
-    SkillSet?: {
-      Skill?: Array<{
-        enabled?: string;
-        Gem?: Array<{name?: string; level?: string; quality?: string}>;
-      }>;
-    };
-  };
-  Items?: {
-    ItemSet?: {
-      Slot?: Array<{
-        name?: string;
-        Item?: string;
-      }>;
-    };
-  };
-  Notes?: string;
-}
-
-// Build cache entry interface
-interface CachedBuild {
-  data: PoBBuild;
-  timestamp: number;
-}
-
-// Phase 2: Optimization Suggestion Interfaces
-interface PathOptimization {
-  destination: string;
-  currentLength: number;
-  optimalLength: number;
-  pointsSaved: number;
-  suggestion: string;
-}
-
-interface EfficiencyScore {
-  nodeId: string;
-  nodeName: string;
-  statsPerPoint: number;
-  isLowValue: boolean;
-}
-
-interface OptimizationSuggestion {
-  type: 'path' | 'efficiency' | 'reachable' | 'ai-context';
-  priority: 'high' | 'medium' | 'low';
-  title: string;
-  description: string;
-  pointsSaved?: number;
-  potentialGain?: string;
-}
-
-// Tree Analysis Results
-interface TreeAnalysisResult {
-  totalPoints: number;
-  availablePoints: number;
-  allocatedNodes: PassiveTreeNode[];
-  keystones: PassiveTreeNode[];
-  notables: PassiveTreeNode[];
-  jewels: PassiveTreeNode[];
-  normalNodes: PassiveTreeNode[];
-  archetype: string;
-  archetypeConfidence: string;
-  pathingEfficiency: string;
-  buildVersion?: string;
-  treeVersion: string;
-  versionMismatch: boolean;
-  invalidNodeIds: string[];
-  optimizationSuggestions?: OptimizationSuggestion[];
-}
-
-// Phase 3: Tree Comparison Interface
-interface TreeComparison {
-  build1: {
-    name: string;
-    analysis: TreeAnalysisResult;
-  };
-  build2: {
-    name: string;
-    analysis: TreeAnalysisResult;
-  };
-  differences: {
-    uniqueToBuild1: PassiveTreeNode[];
-    uniqueToBuild2: PassiveTreeNode[];
-    sharedNodes: PassiveTreeNode[];
-    pointDifference: number;
-    archetypeDifference: string;
-  };
-}
-
-// Phase 3: Allocation Change Interface
-interface AllocationChange {
-  type: 'allocate' | 'remove';
-  nodeIdentifier: string;
-  node?: PassiveTreeNode;
-}
+// Import handlers
+import { handleListBuilds, handleAnalyzeBuild, handleCompareBuilds, handleGetBuildStats } from "./handlers/buildHandlers.js";
+import { handleStartWatching, handleStopWatching, handleGetRecentChanges, handleWatchStatus, handleRefreshTreeData } from "./handlers/watchHandlers.js";
+import { handleCompareTrees, handleTestAllocation, handleGetNearbyNodes, handleFindPath, handleAllocateNodes, handlePlanTree } from "./handlers/treeHandlers.js";
+import { handleLuaStart, handleLuaStop, handleLuaNewBuild, handleLuaLoadBuild, handleLuaGetStats, handleLuaGetTree, handleLuaSetTree } from "./handlers/luaHandlers.js";
+import { handleAddItem, handleGetEquippedItems, handleToggleFlask, handleGetSkillSetup, handleSetMainSkill } from "./handlers/itemSkillHandlers.js";
+import { handleAnalyzeDefenses, handleSuggestOptimalNodes, handleOptimizeTree } from "./handlers/optimizationHandlers.js";
 
 class PoBMCPServer {
   private server: Server;
-  private parser: XMLParser;
   private pobDirectory: string;
+  private parser: XMLParser;
+
+  // Services
+  private buildService: BuildService;
+  private treeService: TreeService;
+  private watchService: WatchService;
+
+  // Legacy properties (still used by methods not yet refactored)
   private watcher: ReturnType<typeof chokidar.watch> | null = null;
   private buildCache: Map<string, CachedBuild> = new Map();
   private treeDataCache: Map<string, TreeDataCache> = new Map();
@@ -228,6 +119,11 @@ class PoBMCPServer {
 
     this.pobDirectory = process.env.POB_DIRECTORY || defaultPoBPath;
 
+    // Initialize services
+    this.buildService = new BuildService(this.pobDirectory);
+    this.treeService = new TreeService(this.buildService);
+    this.watchService = new WatchService(this.pobDirectory, this.buildService);
+
     // Check if Lua bridge is enabled
     this.luaEnabled = process.env.POB_LUA_ENABLED === 'true';
     this.useTcpMode = process.env.POB_API_TCP === 'true';
@@ -249,7 +145,7 @@ class PoBMCPServer {
     };
 
     process.on("SIGINT", async () => {
-      await this.stopWatching();
+      await this.watchService.stopWatching();
       await this.stopLuaClient();
       await this.server.close();
       process.exit(0);
@@ -519,27 +415,55 @@ class PoBMCPServer {
   }
 
   // Tree Analysis Methods
+  private getActiveSpec(build: PoBBuild): any {
+    if (!build.Tree) {
+      return null;
+    }
+
+    const specs = build.Tree.Spec;
+    if (!specs) {
+      return null;
+    }
+
+    // If Spec is an array (multiple specs), find the active one
+    if (Array.isArray(specs)) {
+      const activeSpecIndex = parseInt(build.Tree.activeSpec || "0", 10);
+      // activeSpec is 1-indexed in PoB, array is 0-indexed
+      return specs[activeSpecIndex] || specs[specs.length - 1];
+    }
+
+    // Single spec - return it directly
+    return specs;
+  }
+
   private parseAllocatedNodes(build: PoBBuild): string[] {
-    if (!build.Tree?.Spec?.nodes) {
+    const spec = this.getActiveSpec(build);
+    if (!spec?.nodes) {
       return [];
     }
 
-    const nodesStr = build.Tree.Spec.nodes;
-    return nodesStr.split(',').map(n => n.trim()).filter(n => n.length > 0);
+    const nodesStr = spec.nodes;
+    return nodesStr.split(',').map((n: string) => n.trim()).filter((n: string) => n.length > 0);
   }
 
   private extractBuildVersion(build: PoBBuild): string {
+    const spec = this.getActiveSpec(build);
+
+    if (!spec) {
+      return "Unknown";
+    }
+
     // Try to extract from Tree URL
-    if (build.Tree?.Spec?.URL) {
-      const urlMatch = build.Tree.Spec.URL.match(/version=([^&]+)/);
+    if (spec.URL) {
+      const urlMatch = spec.URL.match(/version=([^&]+)/);
       if (urlMatch) {
         return urlMatch[1];
       }
     }
 
     // Try to extract from treeVersion field
-    if (build.Tree?.Spec?.treeVersion) {
-      return build.Tree.Spec.treeVersion;
+    if (spec.treeVersion) {
+      return spec.treeVersion;
     }
 
     return "Unknown";
@@ -553,6 +477,14 @@ class PoBMCPServer {
     const invalidIds: string[] = [];
 
     for (const nodeId of nodeIds) {
+      const numericId = parseInt(nodeId, 10);
+
+      // Skip cluster jewel socket nodes (IDs >= 65536)
+      // These are dynamically generated by PoB and won't be in static tree data
+      if (numericId >= 65536) {
+        continue;
+      }
+
       const node = treeData.nodes.get(nodeId);
       if (!node) {
         invalidIds.push(nodeId);
@@ -1231,7 +1163,10 @@ class PoBMCPServer {
       }
 
       // Determine tree version from build
-      let treeVersion = build.Tree?.Spec?.treeVersion || "3_26";
+      let treeVersion = this.extractBuildVersion(build);
+      if (treeVersion === "Unknown") {
+        treeVersion = "3_26";
+      }
 
       // Get tree data (with caching)
       const treeData = await this.getTreeData(treeVersion);
@@ -1950,7 +1885,7 @@ class PoBMCPServer {
     // List available resources (build files)
     this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
       try {
-        const builds = await this.listBuilds();
+        const builds = await this.buildService.listBuilds();
         return {
           resources: builds.map((build) => ({
             uri: `pob://build/${encodeURIComponent(build)}`,
@@ -1975,12 +1910,10 @@ class PoBMCPServer {
       }
 
       const buildName = decodeURIComponent(match[1]);
-      const buildPath = path.join(this.pobDirectory, buildName);
 
       try {
-        const content = await fs.readFile(buildPath, "utf-8");
-        const parsed = this.parser.parse(content);
-        const summary = this.generateBuildSummary(parsed.PathOfBuilding);
+        const build = await this.buildService.readBuild(buildName);
+        const summary = this.buildService.generateBuildSummary(build);
 
         return {
           contents: [
@@ -2226,22 +2159,6 @@ class PoBMCPServer {
         },
       ];
 
-      // Add get_build_xml helper tool
-      tools.push({
-        name: "get_build_xml",
-        description: "Get the raw XML content of a build file. Useful for passing to lua_load_build or debugging.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            build_name: {
-              type: "string",
-              description: "Name of the build file (e.g., 'MyBuild.xml')",
-            },
-          },
-          required: ["build_name"],
-        },
-      });
-
       // Add lua_* tools if enabled
       if (this.luaEnabled) {
         tools.push(
@@ -2262,21 +2179,34 @@ class PoBMCPServer {
             },
           },
           {
+            name: "lua_new_build",
+            description: "Create a new empty build in the PoB headless session. This creates a blank build that you can then populate with items, skills, and passive tree selections.",
+            inputSchema: {
+              type: "object",
+              properties: {},
+              required: [],
+            },
+          },
+          {
             name: "lua_load_build",
-            description: "Load a Path of Building build from XML into the PoB headless session. The build will be parsed and ready for stat calculations.",
+            description: "Load a Path of Building build into the PoB headless session. The build will be parsed and ready for stat calculations. Can load from a build name (recommended) or raw XML.",
             inputSchema: {
               type: "object",
               properties: {
+                build_name: {
+                  type: "string",
+                  description: "Name of the build file to load (e.g., 'MyBuild.xml'). Recommended - avoids passing large XML through conversation.",
+                },
                 build_xml: {
                   type: "string",
-                  description: "Raw XML content of the PoB build file",
+                  description: "Raw XML content of the PoB build file. Only use if you have XML from another source (not a file in POB_DIRECTORY).",
                 },
                 name: {
                   type: "string",
                   description: "Optional name for the build (default: 'MCP Build')",
                 },
               },
-              required: ["build_xml"],
+              required: [],
             },
           },
           {
@@ -2525,58 +2455,107 @@ class PoBMCPServer {
       const { name, arguments: args } = request.params;
 
       try {
+        // Create handler contexts
+        const handlerContext = {
+          buildService: this.buildService,
+          treeService: this.treeService,
+        };
+
+        const watchContext = {
+          buildService: this.buildService,
+          treeService: this.treeService,
+          watchService: this.watchService,
+        };
+
+        const treeContext = {
+          buildService: this.buildService,
+          treeService: this.treeService,
+        };
+
+        const luaContext = {
+          pobDirectory: this.pobDirectory,
+          luaEnabled: this.luaEnabled,
+          useTcpMode: this.useTcpMode,
+          getLuaClient: () => this.luaClient,
+          ensureLuaClient: () => this.ensureLuaClient(),
+          stopLuaClient: () => this.stopLuaClient(),
+        };
+
+        const itemSkillContext = {
+          getLuaClient: () => this.luaClient,
+          ensureLuaClient: () => this.ensureLuaClient(),
+        };
+
+        const optimizationContext = {
+          buildService: this.buildService,
+          treeService: this.treeService,
+          pobDirectory: this.pobDirectory,
+          getLuaClient: () => this.luaClient,
+          ensureLuaClient: () => this.ensureLuaClient(),
+          findNearbyNodes: this.findNearbyNodes.bind(this),
+          getTreeData: this.getTreeData.bind(this),
+          readBuild: this.readBuild.bind(this),
+          getActiveSpec: this.getActiveSpec.bind(this),
+          parseAllocatedNodes: this.parseAllocatedNodes.bind(this),
+          extractBuildVersion: this.extractBuildVersion.bind(this),
+        };
+
         switch (name) {
           case "list_builds":
-            return await this.handleListBuilds();
+            return await handleListBuilds(handlerContext);
 
           case "analyze_build":
             if (!args) throw new Error("Missing arguments");
-            return await this.handleAnalyzeBuild(args.build_name as string);
+            return await handleAnalyzeBuild(handlerContext, args.build_name as string);
 
           case "compare_builds":
             if (!args) throw new Error("Missing arguments");
-            return await this.handleCompareBuilds(
+            return await handleCompareBuilds(
+              handlerContext,
               args.build1 as string,
               args.build2 as string
             );
 
           case "get_build_stats":
             if (!args) throw new Error("Missing arguments");
-            return await this.handleGetBuildStats(args.build_name as string);
+            return await handleGetBuildStats(handlerContext, args.build_name as string);
 
           case "start_watching":
-            return this.handleStartWatching();
+            return handleStartWatching(watchContext);
 
           case "stop_watching":
-            return await this.handleStopWatching();
+            return await handleStopWatching(watchContext);
 
           case "get_recent_changes":
-            return this.handleGetRecentChanges(args?.limit as number | undefined);
+            return handleGetRecentChanges(watchContext, args?.limit as number | undefined);
 
           case "watch_status":
-            return this.handleWatchStatus();
+            return handleWatchStatus(watchContext);
 
           case "refresh_tree_data":
-            return await this.handleRefreshTreeData(args?.version as string | undefined);
+            return await handleRefreshTreeData(watchContext, args?.version as string | undefined);
 
           // Phase 3 tools
           case "compare_trees":
             if (!args) throw new Error("Missing arguments");
-            return await this.handleCompareTrees(
+            return await handleCompareTrees(
+              treeContext,
               args.build1 as string,
               args.build2 as string
             );
 
           case "test_allocation":
             if (!args) throw new Error("Missing arguments");
-            return await this.handleTestAllocation(
+            return await handleTestAllocation(
+              treeContext,
               args.build_name as string,
               args.changes as string
             );
 
           case "get_nearby_nodes":
             if (!args) throw new Error("Missing arguments");
-            return await this.handleGetNearbyNodes(
+            return await handleGetNearbyNodes(
+              treeContext,
               args.build_name as string,
               args.max_distance as number | undefined,
               args.filter as string | undefined
@@ -2584,7 +2563,8 @@ class PoBMCPServer {
 
           case "find_path_to_node":
             if (!args) throw new Error("Missing arguments");
-            return await this.handleFindPath(
+            return await handleFindPath(
+              treeContext,
               args.build_name as string,
               args.target_node_id as string,
               args.show_alternatives as boolean | undefined
@@ -2592,7 +2572,8 @@ class PoBMCPServer {
 
           case "allocate_nodes":
             if (!args) throw new Error("Missing arguments");
-            return await this.handleAllocateNodes(
+            return await handleAllocateNodes(
+              treeContext,
               args.build_name as string,
               args.node_ids as string[],
               args.show_full_stats as boolean | undefined
@@ -2600,65 +2581,68 @@ class PoBMCPServer {
 
           case "plan_tree":
             if (!args) throw new Error("Missing arguments");
-            return await this.handlePlanTree(
+            return await handlePlanTree(
+              treeContext,
               args.build_name as string | undefined,
               args.goals as string
             );
 
-          case "get_build_xml":
-            if (!args) throw new Error("Missing arguments");
-            return await this.handleGetBuildXml(args.build_name as string);
-
           // Lua bridge tools
           case "lua_start":
-            return await this.handleLuaStart();
+            return await handleLuaStart(luaContext);
 
           case "lua_stop":
-            return await this.handleLuaStop();
+            return await handleLuaStop(luaContext);
+
+          case "lua_new_build":
+            return await handleLuaNewBuild(luaContext);
 
           case "lua_load_build":
             if (!args) throw new Error("Missing arguments");
-            return await this.handleLuaLoadBuild(
-              args.build_xml as string,
+            return await handleLuaLoadBuild(
+              luaContext,
+              args.build_name as string | undefined,
+              args.build_xml as string | undefined,
               args.name as string | undefined
             );
 
           case "lua_get_stats":
-            return await this.handleLuaGetStats(args?.fields as string[] | undefined);
+            return await handleLuaGetStats(luaContext, args?.fields as string[] | undefined);
 
           case "lua_get_tree":
-            return await this.handleLuaGetTree();
+            return await handleLuaGetTree(luaContext);
 
           case "lua_set_tree":
             if (!args) throw new Error("Missing arguments");
-            return await this.handleLuaSetTree(args);
+            return await handleLuaSetTree(luaContext, args);
 
           // Phase 4: Item & Skill tools
           case "add_item":
             if (!args) throw new Error("Missing arguments");
-            return await this.handleAddItem(args.item_text as string, args.slot_name as string | undefined, args.no_auto_equip as boolean | undefined);
+            return await handleAddItem(itemSkillContext, args.item_text as string, args.slot_name as string | undefined, args.no_auto_equip as boolean | undefined);
 
           case "get_equipped_items":
-            return await this.handleGetEquippedItems();
+            return await handleGetEquippedItems(itemSkillContext);
 
           case "toggle_flask":
             if (!args) throw new Error("Missing arguments");
-            return await this.handleToggleFlask(args.flask_number as number, args.active as boolean);
+            return await handleToggleFlask(itemSkillContext, args.flask_number as number, args.active as boolean);
 
           case "get_skill_setup":
-            return await this.handleGetSkillSetup();
+            return await handleGetSkillSetup(itemSkillContext);
 
           case "set_main_skill":
             if (!args) throw new Error("Missing arguments");
-            return await this.handleSetMainSkill(args.socket_group as number, args.active_skill_index as number | undefined, args.skill_part as number | undefined);
+            return await handleSetMainSkill(itemSkillContext, args.socket_group as number, args.active_skill_index as number | undefined, args.skill_part as number | undefined);
 
           // Phase 6: Build Optimization tools
           case "analyze_defenses":
-            return await this.handleAnalyzeDefenses(args?.build_name as string | undefined);
+            return await handleAnalyzeDefenses(optimizationContext, args?.build_name as string | undefined);
 
           case "suggest_optimal_nodes":
             if (!args) throw new Error("Missing arguments");
-            return await this.handleSuggestOptimalNodes(
+            return await handleSuggestOptimalNodes(
+              optimizationContext,
               args.build_name as string,
               args.goal as string,
               args.max_points as number | undefined,
@@ -2669,7 +2653,8 @@ class PoBMCPServer {
 
           case "optimize_tree":
             if (!args) throw new Error("Missing arguments");
-            return await this.handleOptimizeTree(
+            return await handleOptimizeTree(
+              optimizationContext,
               args.build_name as string,
               args.goal as string,
               args.max_points as number | undefined,
@@ -3109,7 +3094,8 @@ class PoBMCPServer {
     try {
       const build = await this.readBuild(buildName);
 
-      if (!build.Tree?.Spec) {
+      const spec = this.getActiveSpec(build);
+      if (!spec) {
         throw new Error("Build has no passive tree data");
       }
 
@@ -3347,11 +3333,11 @@ class PoBMCPServer {
       const distance = maxDistance || 5;
       const build = await this.readBuild(buildName);
 
-      if (!build.Tree?.Spec) {
+      const spec = this.getActiveSpec(build);
+      if (!spec) {
         throw new Error("Build has no passive tree data");
       }
 
-      const spec = build.Tree.Spec;
       const allocatedNodeIds = this.parseAllocatedNodes(build);
       const allocatedNodes = new Set<string>(allocatedNodeIds);
       const treeVersion = this.extractBuildVersion(build);
@@ -3453,25 +3439,6 @@ class PoBMCPServer {
     }
   }
 
-  private async handleGetBuildXml(buildName: string) {
-    try {
-      const buildPath = path.join(this.pobDirectory, buildName);
-      const xml = await fs.readFile(buildPath, "utf-8");
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: xml,
-          },
-        ],
-      };
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to read build XML: ${errorMsg}`);
-    }
-  }
-
   // Lua Bridge Tool Handlers
   private async handleLuaStart() {
     try {
@@ -3506,7 +3473,7 @@ class PoBMCPServer {
     };
   }
 
-  private async handleLuaLoadBuild(buildXml: string, name?: string) {
+  private async handleLuaNewBuild() {
     try {
       await this.ensureLuaClient();
 
@@ -3514,7 +3481,44 @@ class PoBMCPServer {
         throw new Error('Lua client not initialized');
       }
 
-      await this.luaClient.loadBuildXml(buildXml, name);
+      await this.luaClient.newBuild();
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: "New empty build created successfully.\n\nYou can now use add_item, set_main_skill, lua_set_tree, and other tools to configure this build.",
+          },
+        ],
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to create new build: ${errorMsg}`);
+    }
+  }
+
+  private async handleLuaLoadBuild(buildName?: string, buildXml?: string, name?: string) {
+    try {
+      await this.ensureLuaClient();
+
+      if (!this.luaClient) {
+        throw new Error('Lua client not initialized');
+      }
+
+      // If build_name is provided, read the file
+      let xml = buildXml;
+      if (buildName) {
+        const buildPath = path.join(this.pobDirectory, buildName);
+        xml = await fs.readFile(buildPath, 'utf-8');
+        // Use the build filename as the name if not specified
+        if (!name) {
+          name = buildName.replace(/\.xml$/i, '');
+        }
+      } else if (!xml) {
+        throw new Error('Either build_name or build_xml must be provided');
+      }
+
+      await this.luaClient.loadBuildXml(xml, name);
 
       return {
         content: [
@@ -3792,6 +3796,10 @@ class PoBMCPServer {
 
       const skillData = await this.luaClient.getSkills();
 
+      if (!skillData || typeof skillData !== 'object') {
+        throw new Error('No build loaded. Use lua_load_build or lua_new_build first.');
+      }
+
       let text = "=== Skill Setup ===\n\n";
       text += `Main Socket Group: ${skillData.mainSocketGroup || 'None'}\n\n`;
 
@@ -3974,7 +3982,8 @@ class PoBMCPServer {
 
       // Step 1: Load build and get tree data
       const build = await this.readBuild(buildName);
-      if (!build.Tree?.Spec) {
+      const spec = this.getActiveSpec(build);
+      if (!spec) {
         throw new Error("Build has no passive tree data");
       }
 
@@ -4214,7 +4223,8 @@ class PoBMCPServer {
 
       // Step 1: Load build and tree data
       const build = await this.readBuild(buildName);
-      if (!build.Tree?.Spec) {
+      const spec = this.getActiveSpec(build);
+      if (!spec) {
         throw new Error("Build has no passive tree data");
       }
 

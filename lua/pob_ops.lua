@@ -1496,6 +1496,14 @@ end
 --     name, and PoB's GuessMainSocketGroup is the fallback.
 --   * Deleting the replaced gear uses ItemsTab:DeleteItem, which removes the
 --     item from every item set, as the desktop import does.
+
+-- Let PoB process a frame after a change. Headless, HeadlessWrapper's
+-- runCallback does that; inside the desktop app a command already runs within
+-- a frame, so its server replaces this with a no-op.
+function M.advanceFrame()
+  if runCallback then runCallback("OnFrame") end
+end
+
 local IMPORT_SLOTS = { "Weapon 1", "Weapon 2", "Weapon 1 Swap", "Weapon 2 Swap", "Helmet", "Body Armour",
   "Gloves", "Boots", "Amulet", "Ring 1", "Ring 2", "Belt", "Flask 1", "Flask 2", "Flask 3", "Flask 4", "Flask 5" }
 
@@ -1714,13 +1722,13 @@ function M.import_character(params)
   end
   build.calcsTab.input.skill_number = build.mainSocketGroup
   build.buildFlag = true
-  if runCallback then runCallback("OnFrame") end
+  M.advanceFrame()
   M.get_main_output()
   if mainSkill then
     local mainGroup = groups[build.mainSocketGroup]
     local recalc = function()
       build.buildFlag = true
-      if runCallback then runCallback("OnFrame") end
+      M.advanceFrame()
       M.get_main_output()
     end
     if enableSecondaryEffect(mainGroup, mainSkill) then recalc() end

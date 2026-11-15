@@ -5,6 +5,7 @@
  */
 
 import { PoBLuaApiClient } from '../pobLuaBridge.js';
+import { DEFAULT_GUI_PORT, PoBGuiApiClient } from '../pobGuiClient.js';
 import { noteIgnoredError } from '../utils/errorHandling.js';
 import { BOOTSTRAP_BUILD_NAME } from './bootstrapBuild.js';
 import path from 'node:path';
@@ -38,14 +39,121 @@ function repoPath(...segments: string[]): string {
   );
 }
 
+/** Which engine runs the bridge actions. */
+export type PoBTarget = 'auto' | 'gui' | 'headless';
+export type ActiveTarget = 'gui' | 'headless';
+
+export interface GuiTargetConfig {
+  tokenFile: string;
+  port: number;
+  timeoutMs: number;
+}
+
+/**
+ * The desktop target is configured by POB_GUI_PATH (a PoB checkout with
+ * scripts/pob-gui-apply.mjs applied; its token lives in src/) or directly by
+ * POB_GUI_TOKEN_FILE. Without either, only the headless engine exists.
+ */
+export function guiTargetConfig(env: NodeJS.ProcessEnv = process.env): GuiTargetConfig | null {
+  const tokenFile = env.POB_GUI_TOKEN_FILE
+    || (env.POB_GUI_PATH ? path.join(env.POB_GUI_PATH, 'src', 'pob-mcp-token.txt') : '');
+  if (!tokenFile) return null;
+  return {
+    tokenFile,
+    port: Number(env.POB_MCP_PORT) || DEFAULT_GUI_PORT,
+    timeoutMs: Number(env.POB_GUI_TIMEOUT_MS) || 30000,
+  };
+}
+
+// The window is opt-in: tools that load builds (import_character, compare,
+// the optimisers) replace what is open there, so it is used only when chosen.
+function parseTarget(value: string | undefined): PoBTarget {
+  return value === 'gui' || value === 'headless' || value === 'auto' ? value : 'headless';
+}
+
+export interface TargetStatus {
+  preferred: PoBTarget;
+  active: ActiveTarget | null;
+  guiConfigured: boolean;
+  guiReachable?: boolean;
+  guiError?: string;
+  gui?: Record<string, unknown>;
+}
+
 export class LuaClientManager {
   private client: PoBLuaApiClient | null = null;
   private enabled: boolean;
   private starting: Promise<void> | null = null;
   private stopping: Promise<void> | null = null;
+  private preferred: PoBTarget;
+  private active: ActiveTarget | null = null;
+  private switching: Promise<TargetStatus> | null = null;
+  private readonly guiConfig: GuiTargetConfig | null;
 
-  constructor(enabled: boolean) {
+  constructor(enabled: boolean, env: NodeJS.ProcessEnv = process.env) {
     this.enabled = enabled;
+    this.guiConfig = guiTargetConfig(env);
+    this.preferred = this.guiConfig ? parseTarget(env.POB_TARGET) : 'headless';
+  }
+
+  /** Which engine is serving tool calls, and what the desktop app reports. */
+  async targetStatus(): Promise<TargetStatus> {
+    const status: TargetStatus = {
+      preferred: this.preferred,
+      active: this.client && this.client.isAlive() ? this.active : null,
+      guiConfigured: !!this.guiConfig,
+    };
+    if (!this.guiConfig) return status;
+    // Always a separate short-lived connection: the active client is untouched
+    // and the status never waits behind a long request in its queue.
+    const probe = new PoBGuiApiClient({ ...this.guiConfig, connectTimeoutMs: 1500, timeoutMs: 1500 });
+    try {
+      await probe.start();
+      status.gui = await probe.guiStatus();
+      status.guiReachable = true;
+    } catch (e) {
+      status.guiReachable = false;
+      status.guiError = e instanceof Error ? e.message : String(e);
+    } finally {
+      await probe.stop();
+    }
+    return status;
+  }
+
+  /**
+   * Switch engines explicitly. The build loaded in the old engine stays there:
+   * the caller must load or open a build in the new one.
+   */
+  async selectTarget(target: PoBTarget): Promise<TargetStatus> {
+    if (target !== 'headless' && !this.guiConfig) {
+      throw new Error('The Path of Building desktop target is not configured: set POB_GUI_PATH (or POB_GUI_TOKEN_FILE) in the server env.');
+    }
+    if (this.switching) await this.switching.catch(() => {});
+    const run = (async () => {
+      const alreadyThere = this.client && this.client.isAlive()
+        && (target === this.active || (target === 'auto' && this.preferred === 'auto'));
+      if (alreadyThere) {
+        this.preferred = target;
+        return this.targetStatus();
+      }
+      const previous = this.preferred;
+      // Set before stopping, so a tool call that races in starts the new engine.
+      this.preferred = target;
+      await this.stopClient();
+      try {
+        await this.ensureClient();
+      } catch (error) {
+        this.preferred = previous;
+        throw new Error(`${error instanceof Error ? error.message : String(error)} (kept the ${previous} preference; the next call starts that engine again with a fresh build)`);
+      }
+      return this.targetStatus();
+    })();
+    this.switching = run;
+    try {
+      return await run;
+    } finally {
+      if (this.switching === run) this.switching = null;
+    }
   }
 
   /**
@@ -83,6 +191,7 @@ export class LuaClientManager {
 
     let crashed = false;
     let deadClient: PoBLuaApiClient | null = null;
+    const lostTarget = this.active;
     if (this.client) {
       // Process died — clean up the dead client so we restart below
       console.error('[Lua Bridge] Client process died, restarting...');
@@ -100,7 +209,13 @@ export class LuaClientManager {
       if (deadClient) {
         try { await deadClient.stop(); } catch (e) { noteIgnoredError("stop of crashed bridge before restart (process already gone)", e); }
       }
-      await this.initClient();
+      // After a loss, restart the same engine: switching would answer the
+      // next calls from a different build without anyone noticing.
+      await this.initClient(crashed && lostTarget ? lostTarget : undefined);
+      if (crashed && lostTarget === 'gui') {
+        // Never switch engines silently: the next answers would come from a different build.
+        throw new Error(`The connection to the Path of Building window was lost (closed, or minimised past the timeout). Now using the ${this.active} engine${this.active === 'gui' ? ' again' : ''}; check which build it has (pob_target, lua_get_build_info) before trusting results, then retry.`);
+      }
       if (crashed) {
         // The restarted bridge holds only the init-test build; proceeding silently
         // would return blank-character stats as if they were the user's build.
@@ -117,7 +232,35 @@ export class LuaClientManager {
     }
   }
 
-  private async initClient(): Promise<void> {
+  private async initClient(only?: ActiveTarget): Promise<void> {
+    if (only === 'headless') {
+      await this.initHeadlessClient();
+      this.active = 'headless';
+      return;
+    }
+    if (only === 'gui' || (this.preferred !== 'headless' && this.guiConfig)) {
+      if (!this.guiConfig) throw new Error('The Path of Building desktop target is not configured');
+      const gui = new PoBGuiApiClient(this.guiConfig);
+      try {
+        await gui.start();
+        // No bootstrap build here: the window shows the user's build and stays as it is.
+        this.client = gui;
+        this.active = 'gui';
+        console.error('[Lua Bridge] Using the Path of Building desktop window');
+        return;
+      } catch (error) {
+        await gui.stop();
+        if (this.preferred === 'gui' || only === 'gui') {
+          throw new Error(`Failed to reach Path of Building desktop: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        noteIgnoredError('desktop target unavailable, using the headless engine (POB_TARGET=auto)', error);
+      }
+    }
+    await this.initHeadlessClient();
+    this.active = 'headless';
+  }
+
+  private async initHeadlessClient(): Promise<void> {
     console.error('[Lua Bridge] Initializing client...');
 
     const stdioClient = new PoBLuaApiClient({

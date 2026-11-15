@@ -104,6 +104,25 @@ local function newToken()
   return table.concat(t)
 end
 
+-- A build this server loaded from XML or created is born unsaved (Build.lua
+-- sets modFlag for XML loads) and its later bridge edits only raise the same
+-- build-level flag. Those are this server's own, so they must not block the
+-- next load. Its tabs are recreated by every build Init, so the treeTab
+-- object identifies "the build we loaded" until anything opens another one.
+function Server:Owns(build)
+  return build ~= nil and self.ownedTab ~= nil and build.treeTab == self.ownedTab
+end
+
+-- Unsaved changes that may be someone else's: everything when the user
+-- opened the build, the per-tab flags (UI edits) when this server loaded it.
+function Server:UserChanges(build)
+  local flags = unsavedFlags(build)
+  if not self:Owns(build) then return flags end
+  local others = {}
+  for _, f in ipairs(flags) do if f ~= "build" then others[#others + 1] = f end end
+  return others
+end
+
 function Server:Handle(request)
   local main = self.main
   local action, params = request.action, request.params or {}
@@ -112,16 +131,21 @@ function Server:Handle(request)
   if (REPLACES_BUILD[action] or MODIFIES_BUILD[action]) and main.popups[1] then
     return { ok = false, error = "a dialog is open in Path of Building; finish or close it first" }
   end
-  if REPLACES_BUILD[action] and build and #unsavedFlags(build) > 0 and params.force ~= true then
-    return { ok = false, error = "the build open in Path of Building has unsaved changes (" .. table.concat(unsavedFlags(build), ", ")
-      .. "); save it in PoB first, or pass force: true to discard them" }
+  if REPLACES_BUILD[action] and build and params.force ~= true then
+    local blocking = self:UserChanges(build)
+    if #blocking > 0 then
+      return { ok = false, error = "the build open in Path of Building has unsaved changes (" .. table.concat(blocking, ", ")
+        .. "); save it in PoB first, or pass force: true to discard them" }
+    end
   end
   if not build and not NO_BUILD_NEEDED[action] then
     return { ok = false, error = "no build is open in Path of Building (screen: " .. tostring(main.mode) .. ")" }
   end
 
   if action == "gui_status" then
-    return { ok = true, status = guiStatus(main) }
+    local status = guiStatus(main)
+    if status.build then status.build.loadedByMcp = self:Owns(build) end
+    return { ok = true, status = status }
   elseif action == "open_build" then
     -- Opens a saved build as PoB's own build list does: with only the file path,
     -- PoB reads the file itself and the build opens clean (Build.lua marks a
@@ -133,6 +157,7 @@ function Server:Handle(request)
     local name = params.path:match("([^/\\]+)%.[xX][mM][lL]$") or "Build"
     main:SetMode("BUILD", params.path, name)
     applyModeChange(main)
+    self.ownedTab = nil
     _G.build = openBuild(main)
     if not _G.build or not _G.build.savers then return { ok = false, error = "PoB did not open the build" } end
     return { ok = true, status = guiStatus(main) }
@@ -166,6 +191,13 @@ function Server:OnLine(c, line)
   if type(request) ~= "table" then
     c.out = c.out .. encode({ ok = false, error = "invalid request: expected a JSON object; closing" })
     return false
+  end
+  -- The client gives up after its timeout (e.g. while the window was
+  -- minimised) and reports failure; running the request after that would
+  -- apply a change the caller was told did not happen. Same machine, same clock.
+  if type(request.deadline) == "number" and socket.gettime() * 1000 > request.deadline then
+    c.out = c.out .. encode({ ok = false, error = "request expired before Path of Building could run it" })
+    return c.authed
   end
   if not c.authed then
     if request.action == "hello" and request.token == self.token then
@@ -245,18 +277,23 @@ function M.start(main)
   -- The headless bridge advances PoB a frame with runCallback after an import;
   -- here PoB is already inside a frame, and get_main_output recalculates.
   BuildOps.advanceFrame = function() end
+  local server = setmetatable({ main = main, clients = {} }, Server)
+  local function loaded()
+    _G.build = openBuild(main)
+    server.ownedTab = _G.build and _G.build.treeTab or nil
+  end
   local handlers = LoadModule("Modules/PobMcp/bridge_handlers")(BuildOps, Compat, {
     mode = "gui",
     adapter = ADAPTER,
     newBuild = function()
       main:SetMode("BUILD", false, "Unnamed build")
       applyModeChange(main)
-      _G.build = openBuild(main)
+      loaded()
     end,
     loadBuildFromXML = function(xml, name)
       main:SetMode("BUILD", false, name or "MCP Build", xml)
       applyModeChange(main)
-      _G.build = openBuild(main)
+      loaded()
     end,
   })
   local capabilities = handlers.get_capabilities
@@ -289,7 +326,8 @@ function M.start(main)
   f:write(token)
   f:close()
   ConPrintf("MCP server: listening on 127.0.0.1:%d (token in %s)", port, tokenPath)
-  return setmetatable({ main = main, listener = listener, clients = {}, port = port, handlers = handlers, token = token }, Server)
+  server.listener, server.port, server.handlers, server.token = listener, port, handlers, token
+  return server
 end
 
 return M

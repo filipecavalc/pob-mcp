@@ -291,6 +291,10 @@ class PoBMCPServer {
           ninjaClient: this.ninjaClient,
           getLuaClient: () => this.luaClientManager.getClient(),
           ensureLuaClient: () => this.luaClientManager.ensureClient(),
+          luaTargets: this.luaClientManager.isEnabled() ? {
+            targetStatus: () => this.luaClientManager.targetStatus(),
+            selectTarget: (target) => this.luaClientManager.selectTarget(target),
+          } : undefined,
         };
 
         // Route the tool call

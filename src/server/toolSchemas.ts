@@ -365,6 +365,20 @@ export function getLuaToolSchemas(): ToolSchema[] {
       },
     },
     {
+      name: "pob_target",
+      description: "Show or choose which Path of Building engine runs the lua_* and build tools: the Path of Building desktop window (the build the user sees, when POB_GUI_PATH is configured and the window with the MCP server is running) or the headless engine. Without target, reports the engine in use, whether the window is reachable, the build open in it and whether it has unsaved changes. With target, switches engines; the new engine has its own build, so open or load one afterwards. The engine never switches by itself mid-session: if the window stops answering (minimised windows do not process), tool calls fail with an explanation instead.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          target: {
+            type: "string",
+            enum: ["auto", "gui", "headless"],
+            description: "auto: the window if it answers, else headless. gui: the window only. headless: the background engine only.",
+          },
+        },
+      },
+    },
+    {
       name: "import_character",
       description: "Pull a character's current tree, items and gems from pathofexile.com (public profile, no login; the account's Characters tab must be public) and import them with PoB's own importer, the same code as the desktop app's 'Import from website'. Imports on top of base_build (or save_as when that file exists) so its config and skill settings are kept; bandit, pantheon and resistance penalty, which PoB's importer overwrites, are kept from the base. Like the desktop import, replaced gear is removed from every item set of the base, and only the active spec, item set and config set receive the import. Everything is fetched before the loaded build is touched, and a failed import reloads the base. Reports gear and stat changes against the base and saves to save_as. Defaults come from POE_ACCOUNT_NAME, POE_CHARACTER and POB_CHARACTER_BUILD. pathofexile.com refreshes items only when the character changes zone or logs out.",
       inputSchema: {

@@ -11,9 +11,9 @@ import { resolvePoBLayout } from "./utils/pobLayout.js";
 /** Lua bridge request envelope */
 // params is only ever serialised, so an interface with declared keys is as valid
 // a payload here as a bag of unknowns.
-type LuaRequest = { action: string; params?: object };
+export type LuaRequest = { action: string; params?: object };
 /** Lua bridge response envelope — always an object with at minimum `ok: boolean` */
-type LuaResponse = { ok: boolean; error?: string; [key: string]: unknown };
+export type LuaResponse = { ok: boolean; error?: string; [key: string]: unknown };
 
 // ============================================================================
 // Typed bridge results. Each interface mirrors the exact table returned by the
@@ -270,7 +270,7 @@ interface BuildLoadResult {
 }
 
 /** save_build */
-interface SavedBuild {
+export interface SavedBuild {
   path: string;
   /** byte size of the XML PoB serialized */
   size: number;
@@ -570,7 +570,8 @@ export class PoBLuaApiClient {
     });
   }
 
-  private async send(obj: LuaRequest): Promise<LuaResponse> {
+  /** Overridden by transports other than the stdio process (see pobGuiClient.ts). */
+  protected async send(obj: LuaRequest): Promise<LuaResponse> {
     if (!this.proc || !this.proc.stdin) throw new Error("Process not started");
     if (this.killed) throw new Error("PoB API exited");
     if (!this.ready) throw new Error("Process not ready");

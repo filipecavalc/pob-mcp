@@ -1023,6 +1023,13 @@ const SIMULATED_STATS: Array<{ key: string; label: string }> = [
   { key: 'ColdResist', label: 'Cold Resistance' },
   { key: 'LightningResist', label: 'Lightning Resistance' },
   { key: 'ChaosResist', label: 'Chaos Resistance' },
+  // TotalEHP averages damage types; the per-type max hit is what decides which hit kills.
+  { key: 'PhysicalMaximumHitTaken', label: 'Physical max hit' },
+  { key: 'FireMaximumHitTaken', label: 'Fire max hit' },
+  { key: 'ColdMaximumHitTaken', label: 'Cold max hit' },
+  { key: 'LightningMaximumHitTaken', label: 'Lightning max hit' },
+  { key: 'ChaosMaximumHitTaken', label: 'Chaos max hit' },
+  { key: 'TotalNetRegen', label: 'Net recovery/s' },
   { key: 'Str', label: 'Strength' },
   { key: 'Dex', label: 'Dexterity' },
   { key: 'Int', label: 'Intelligence' },
@@ -1096,6 +1103,7 @@ export async function handleLuaSimulate(
     slotName?: string;
     toggleFlask?: number;
     useFullDPS?: boolean;
+    assumeMaxQuality?: boolean;
   },
 ) {
   return wrapHandler('simulate change', async () => {
@@ -1118,7 +1126,7 @@ export async function handleLuaSimulate(
       throw new Error('nothing to simulate: pass at least one of itemText+slotName, toggleFlask, addNodes, removeNodes or masteryEffects');
     }
 
-    const { output, base } = await luaClient.calcWith({ ...hypothesis, useFullDPS: args.useFullDPS });
+    const { output, base } = await luaClient.calcWith({ ...hypothesis, useFullDPS: args.useFullDPS, assumeMaxQuality: args.assumeMaxQuality });
 
     const described = [
       args.itemText && args.slotName ? `swap ${args.slotName}` : undefined,

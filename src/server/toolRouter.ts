@@ -216,6 +216,7 @@ export async function routeToolCall(
         slotName: args?.slotName as string | undefined,
         toggleFlask: args?.toggleFlask as number | undefined,
         useFullDPS: args?.useFullDPS as boolean | undefined,
+        assumeMaxQuality: args?.assumeMaxQuality === true,
       });
 
     case "lua_get_stats":
@@ -340,7 +341,7 @@ export async function routeToolCall(
     // Phase 4: Item & Skill tools
     case "add_item":
       if (!args) throw new Error("Missing arguments");
-      return await handleAddItem(itemSkillContext, args.item_text as string, args.slot_name as string | undefined, args.no_auto_equip as boolean | undefined);
+      return await handleAddItem(itemSkillContext, args.item_text as string, args.slot_name as string | undefined, args.no_auto_equip as boolean | undefined, args.assume_max_quality === true);
 
     case "get_equipped_items":
       return await handleGetEquippedItems(itemSkillContext);

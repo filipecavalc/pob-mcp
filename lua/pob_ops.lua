@@ -504,7 +504,7 @@ function M.calc_with(params)
     local parsed, item = pcall(Compat.construct, 'Item', params.repItem)
     if not parsed then return nil, 'invalid item text: ' .. tostring(item) end
     if not item or not item.baseName then return nil, 'failed to parse item' end
-    item:NormaliseQuality()
+    M.apply_item_quality(item, params.assumeMaxQuality == true)
     -- Quality moves the item's mods, so rebuild them as ItemsTab does after normalising.
     item:BuildModList()
     override.repSlotName = params.repSlotName
@@ -740,6 +740,21 @@ function M.set_main_selection(params)
   return true
 end
 
+-- PoB's NormaliseQuality (Item.lua) raises any armour, weapon or flask
+-- without a Unique ID that is not corrupted, split or mirrored to 20%
+-- quality: the desktop paste box assumes you will quality what you craft.
+-- Item text copied in game carries no Unique ID, so a 0% listing would be
+-- valued as 20%. By default an item keeps the quality its text states (none
+-- stated means 0, as NormaliseQuality's own first branch does); pass
+-- assumeMaxQuality to get PoB's assumption.
+function M.apply_item_quality(item, assumeMaxQuality)
+  if assumeMaxQuality then
+    item:NormaliseQuality()
+  elseif item.quality == nil and item.base and (item.base.armour or item.base.weapon or item.base.flask or item.base.tincture) then
+    item.quality = 0
+  end
+end
+
 function M.add_item_text(params)
   if not build or not build.itemsTab then return nil, 'items not initialized' end
   if type(params) ~= 'table' or type(params.text) ~= 'string' then return nil, 'missing text' end
@@ -753,7 +768,7 @@ function M.add_item_text(params)
   if not ok then return nil, 'invalid item text: ' .. tostring(item) end
   if not item or not item.baseName then return nil, 'failed to parse item' end
 
-  item:NormaliseQuality()
+  M.apply_item_quality(item, params.assumeMaxQuality == true)
   build.itemsTab:AddItem(item, params.noAutoEquip == true)
   if params.slotName then
     local slot = tostring(params.slotName)
@@ -1543,6 +1558,87 @@ local function selectSkillInGroup(group, gemName)
   return false
 end
 
+-- Same lookup ImportSocketedItems uses (ImportTab.lua); a gem it cannot resolve is dropped there.
+local function importableGemId(socketed)
+  local gemId = build.data.gemForBaseName[sanitiseText(socketed.typeLine or ''):lower()]
+  if socketed.hybrid then
+    gemId = build.data.gemForBaseName[sanitiseText(socketed.hybrid.baseTypeName or ''):lower()]
+    if gemId and socketed.hybrid.isVaalGem then
+      gemId = build.data.gemGrantedEffectIdForVaalGemId[build.data.gems[gemId].grantedEffectId]
+    end
+  end
+  return gemId
+end
+
+-- inventoryIds ImportItem places: its slotMap keys plus Flask and PassiveJewels (ImportTab.lua).
+local IMPORTED_INVENTORY_IDS = {
+  Weapon = true, Offhand = true, Weapon2 = true, Offhand2 = true, Helm = true, BodyArmour = true,
+  Gloves = true, Boots = true, Amulet = true, Ring = true, Ring2 = true, Ring3 = true, Belt = true,
+  BrequelGrafts = true, BrequelGrafts2 = true, Flask = true, PassiveJewels = true,
+}
+
+-- What the response held that the importer did not bring in. ImportItem skips
+-- unknown inventoryIds, unknown bases and unrecognised rarities without a
+-- message, and ImportSocketedItems skips gems it cannot resolve; every
+-- imported item keeps the response's id as uniqueID.
+local function auditImport(params)
+  local present = {}
+  for _, item in pairs(build.itemsTab.items) do
+    if item.uniqueID then present[item.uniqueID] = true end
+  end
+  local missingItems, missingGems = {}, {}
+  local counts = { items = 0, gems = 0, notEquipped = 0 }
+  local function checkItem(entry, where)
+    counts.items = counts.items + 1
+    if entry.id and not present[entry.id] then
+      table.insert(missingItems, { where = where, name = entry.name ~= '' and entry.name or nil, base = entry.typeLine })
+    end
+  end
+  local function checkGear(entry, where)
+    checkItem(entry, where)
+    for _, socketed in ipairs(entry.socketedItems or {}) do
+      if socketed.abyssJewel then
+        checkItem(socketed, where .. ' abyssal socket')
+      else
+        counts.gems = counts.gems + 1
+        if not importableGemId(socketed) then
+          table.insert(missingGems, { where = where, name = socketed.typeLine })
+        end
+      end
+    end
+  end
+  for _, entry in ipairs(params.items.items or {}) do
+    local inventoryId = tostring(entry.inventoryId or '?')
+    if not IMPORTED_INVENTORY_IDS[inventoryId] then
+      -- Bag or stash entries: ImportItem has no slot for them and is not meant to.
+      counts.notEquipped = counts.notEquipped + 1
+    elseif not (params.ignoreWeaponSwap == true and (inventoryId == 'Weapon2' or inventoryId == 'Offhand2')) then
+      checkGear(entry, inventoryId)
+    end
+  end
+  for _, entry in ipairs(params.items.guardian or {}) do checkGear(entry, 'guardian ' .. tostring(entry.inventoryId or '?')) end
+  for _, entry in ipairs(params.passives.items or {}) do checkItem(entry, 'passive tree jewel') end
+
+  -- Mod lines PoB shows in red: parsed into nothing, so they do not count in any number.
+  local unsupported = {}
+  local listNames = { 'enchantModLines', 'scourgeModLines', 'classRequirementModLines', 'implicitModLines',
+    'explicitModLines', 'crucibleModLines', 'buffModLines' }
+  for slotName, slot in pairs(build.itemsTab.slots) do
+    local item = slot.selItemId and build.itemsTab.items[slot.selItemId]
+    if item then
+      for _, listName in ipairs(listNames) do
+        for _, modLine in ipairs(item[listName] or {}) do
+          if modLine.extra then
+            table.insert(unsupported, { slot = slotName, item = item.title or item.name, line = modLine.line })
+          end
+        end
+      end
+    end
+  end
+  table.sort(unsupported, function(a, b) return a.slot < b.slot end)
+  return { counts = counts, missingItems = missingItems, missingGems = missingGems, unsupportedLines = unsupported }
+end
+
 function M.import_character(params)
   if not build or not build.importTab or not build.configTab or not build.skillsTab then
     return nil, 'build not initialized'
@@ -1653,6 +1749,12 @@ function M.import_character(params)
     mainSocketGroup = build.mainSocketGroup,
     restoredConfig = restored,
     items = items,
+    -- A surprise in the response shape must not turn a finished import into a failure.
+    audit = (function()
+      local ok, result = pcall(auditImport, params)
+      if ok then return result end
+      return { error = tostring(result) }
+    end)(),
   }
 end
 

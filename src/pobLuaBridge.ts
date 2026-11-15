@@ -99,6 +99,16 @@ export interface CharacterImportResult {
   /** Config options PoB's importer changed and that were put back: key -> values. */
   restoredConfig?: Record<string, { imported: unknown; kept: unknown }> | unknown[];
   items?: Array<{ slot: string; name?: string; base?: string }>;
+  /** What the response held that PoB did not import or cannot calculate. */
+  audit?: {
+    /** Set when the audit itself failed; the import still succeeded. */
+    error?: string;
+    /** notEquipped: response entries outside any slot PoB imports (bag or stash). */
+    counts?: { items?: number; gems?: number; notEquipped?: number };
+    missingItems?: Array<{ where: string; name?: string; base?: string }>;
+    missingGems?: Array<{ where: string; name?: string }>;
+    unsupportedLines?: Array<{ slot: string; item?: string; line: string }>;
+  };
 }
 
 /** get_items entry (M.get_items) */
@@ -342,6 +352,8 @@ export interface CalcWithParams {
   repSlotName?: string;
   toggleFlask?: number;
   useFullDPS?: boolean;
+  /** Value repItem at 20% quality the way PoB's paste box does; default keeps its stated quality. */
+  assumeMaxQuality?: boolean;
 }
 
 export class PoBLuaApiClient {
@@ -720,10 +732,10 @@ export class PoBLuaApiClient {
     return res.items as EquippedItem[];
   }
 
-  async addItem(itemText: string, slotName?: string, noAutoEquip?: boolean): Promise<AddedItem> {
+  async addItem(itemText: string, slotName?: string, noAutoEquip?: boolean, assumeMaxQuality?: boolean): Promise<AddedItem> {
     const res = await this.send({
       action: "add_item_text",
-      params: { text: itemText, slotName, noAutoEquip },
+      params: { text: itemText, slotName, noAutoEquip, assumeMaxQuality },
     });
     if (!res.ok) throw new Error(res.error || "add_item_text failed");
     return res.item as AddedItem;

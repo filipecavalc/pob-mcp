@@ -11,7 +11,8 @@ export async function handleAddItem(
   context: ItemSkillHandlerContext,
   itemText: string,
   slotName?: string,
-  noAutoEquip?: boolean
+  noAutoEquip?: boolean,
+  assumeMaxQuality?: boolean
 ) {
   return wrapHandler('add item', async () => {
     await context.ensureLuaClient();
@@ -25,7 +26,7 @@ export async function handleAddItem(
       throw new Error('item_text cannot be empty');
     }
 
-    const result = await luaClient.addItem(itemText, slotName, noAutoEquip);
+    const result = await luaClient.addItem(itemText, slotName, noAutoEquip, assumeMaxQuality);
 
     const text = `✅ Item added: ${result.name || 'Unknown'} → ${result.slot || 'Not equipped'}`;
 

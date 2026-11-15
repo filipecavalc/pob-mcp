@@ -4,6 +4,7 @@ import { noteIgnoredError, wrapHandler } from "../utils/errorHandling.js";
 import { buildFileName, resolveBuildFile } from "../utils/pathSanitizer.js";
 import { normalizeAccountName, sharedPoeCharacterClient, type CharacterEntry, type PoeCharacterClient, type PoeCharacterError, type Realm } from "../services/poeCharacterClient.js";
 import { formatDelta, formatStat, statNumber, type LuaHandlerContext } from "./luaHandlers.js";
+import type { CharacterImportResult } from "../pobLuaBridge.js";
 
 /** Stats compared before and after a character import. */
 const IMPORT_STATS: Array<{ key: string; label: string }> = [
@@ -134,6 +135,51 @@ export function describeGemChanges(before: Map<string, string>, after: Map<strin
     if (a === b) continue;
     const [slot, name] = key.replace(/#\d+$/, '').split('|');
     out.push(`  ${slot}: ${name} ${a ?? '(not socketed)'} → ${b ?? '(removed)'}`);
+  }
+  return out;
+}
+
+/** get-items carries character.lastLoginTime as Unix seconds. */
+export function describeLastLogin(seconds: unknown, now: Date = new Date()): string | undefined {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return undefined;
+  const at = new Date(seconds * 1000);
+  const minutes = Math.round((now.getTime() - at.getTime()) / 60000);
+  const ago = minutes < 1 ? 'just now'
+    : minutes < 120 ? `${minutes} min ago`
+      : minutes < 48 * 60 ? `${Math.round(minutes / 60)} h ago`
+        : `${Math.round(minutes / 1440)} days ago`;
+  return `${at.toISOString().replace('T', ' ').slice(0, 16)} UTC (${ago})`;
+}
+
+type ImportAudit = NonNullable<CharacterImportResult['audit']>;
+
+/**
+ * Completeness of the import: what pathofexile.com sent that PoB did not
+ * bring in, and lines PoB cannot calculate (red in PoB), which count in none
+ * of the numbers reported.
+ */
+export function describeAudit(audit: ImportAudit | undefined): string[] {
+  if (!audit) return [];
+  if (audit.error) return [`⚠️ Completeness check could not run (${audit.error}); the import itself succeeded.`];
+  // dkjson encodes empty Lua tables as [] and may send objects for sparse ones.
+  const list = <T>(value: T[] | Record<string, T> | undefined): T[] =>
+    Array.isArray(value) ? value : value ? Object.values(value) : [];
+  const missingItems = list(audit.missingItems);
+  const missingGems = list(audit.missingGems);
+  const unsupported = list(audit.unsupportedLines);
+  const out: string[] = [];
+  const counts = audit.counts ?? {};
+  if (!missingItems.length && !missingGems.length) {
+    out.push(`Import complete: all ${counts.items ?? '?'} items and ${counts.gems ?? '?'} gems from pathofexile.com are in the build.`
+      + (counts.notEquipped ? ` (${counts.notEquipped} unequipped bag entries ignored, as PoB does.)` : ''));
+  } else {
+    out.push('', `⚠️ Not imported by PoB (left out of every number below):`);
+    for (const m of missingItems) out.push(`  item ${m.where}: ${[m.name, m.base].filter(Boolean).join(', ')}`);
+    for (const g of missingGems) out.push(`  gem ${g.where}: ${g.name ?? '?'}`);
+  }
+  if (unsupported.length) {
+    out.push('', `Lines PoB cannot calculate (shown red in PoB; they count in none of the numbers):`);
+    for (const u of unsupported) out.push(`  ${u.slot} (${u.item ?? '?'}): ${u.line}`);
   }
   return out;
 }
@@ -270,6 +316,9 @@ export async function handleImportCharacter(context: LuaHandlerContext, args: Im
       `Class: ${result.class}/${result.ascendancy} · level ${result.level} · ${result.allocatedNodes} passive nodes · ${result.socketGroups} socket groups`,
       `Main skill: ${result.mainSkill ?? 'none'} (${result.mainSkillSource}${result.mainSkillWanted && result.mainSkill?.toLowerCase() !== result.mainSkillWanted.toLowerCase() ? `; no group has ${result.mainSkillWanted}, pass main_skill to choose` : ''})`,
     ];
+    const lastLogin = describeLastLogin((items as { character?: { lastLoginTime?: unknown } }).character?.lastLoginTime);
+    if (lastLogin) lines.push(`pathofexile.com last login: ${lastLogin}`);
+    lines.push(...describeAudit(result.audit));
 
     // dkjson encodes an empty Lua table as [], so only an object carries entries.
     const restored = result.restoredConfig && !Array.isArray(result.restoredConfig) ? Object.entries(result.restoredConfig) : [];

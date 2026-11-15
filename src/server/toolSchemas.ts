@@ -541,6 +541,7 @@ export function getLuaToolSchemas(): ToolSchema[] {
           removeNodes: { type: "array", items: { type: "number" }, description: "Passive node IDs to unallocate for this calculation." },
           masteryEffects: { type: "object", description: "Mastery effect choices as { nodeId: effectId } (see suggest_masteries)." },
           useFullDPS: { type: "boolean", description: "Total the DPS of every enabled skill instead of the main one." },
+          assumeMaxQuality: { type: "boolean", description: "Value itemText at 20% quality, as PoB's paste box does for gear without a Unique ID (in-game copies have none). Default false: the item keeps the quality its text states, none stated meaning 0, so a trade listing is valued as sold." },
         },
       },
     },
@@ -693,6 +694,10 @@ export function getLuaToolSchemas(): ToolSchema[] {
           no_auto_equip: {
             type: "boolean",
             description: "Add the item to the build's item list without equipping it in a slot (default: false)",
+          },
+          assume_max_quality: {
+            type: "boolean",
+            description: "Raise gear without a Unique ID to 20% quality, as PoB's paste box does. Default false: the item keeps the quality its text states (none stated = 0).",
           },
         },
         required: ["item_text", "slot_name"],

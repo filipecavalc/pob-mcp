@@ -83,6 +83,24 @@ type CalcOutput = { [stat: string]: number | undefined } & {
   _meta?: StatsMeta;
 };
 
+/** import_character result (M.import_character) */
+export interface CharacterImportResult {
+  name?: string;
+  league?: string;
+  class?: string;
+  ascendancy?: string;
+  level?: number;
+  allocatedNodes?: number;
+  socketGroups?: number;
+  mainSkill?: string;
+  mainSkillWanted?: string;
+  mainSkillSource?: 'kept' | 'matched by name' | 'guessed by PoB';
+  mainSocketGroup?: number;
+  /** Config options PoB's importer changed and that were put back: key -> values. */
+  restoredConfig?: Record<string, { imported: unknown; kept: unknown }> | unknown[];
+  items?: Array<{ slot: string; name?: string; base?: string }>;
+}
+
 /** get_items entry (M.get_items) */
 interface EquippedItem {
   slot: string;
@@ -709,6 +727,27 @@ export class PoBLuaApiClient {
     });
     if (!res.ok) throw new Error(res.error || "add_item_text failed");
     return res.item as AddedItem;
+  }
+
+  /**
+   * Runs PoB's own character importer (ImportTab) on pathofexile.com's
+   * character-window JSON, on top of the loaded build. The in-memory build no
+   * longer matches the file it was loaded from (even when the import fails
+   * halfway), so the loaded file path is cleared: replacing that file now
+   * takes an explicit overwrite.
+   */
+  async importCharacter(params: {
+    character: Record<string, unknown>;
+    passives: Record<string, unknown>;
+    items: Record<string, unknown>;
+    mainSkill?: string;
+    ignoreWeaponSwap?: boolean;
+  }): Promise<CharacterImportResult> {
+    this.loadedFilePath = undefined;
+    this.buildGeneration++;
+    const res = await this.send({ action: "import_character", params });
+    if (!res.ok) throw new Error(res.error || "import_character failed");
+    return res.result as CharacterImportResult;
   }
 
   async setFlaskActive(flaskIndex: number, active: boolean): Promise<void> {

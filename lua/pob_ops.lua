@@ -1459,5 +1459,201 @@ function M.get_mastery_options()
   return { masteries = result }
 end
 
+-- Import a character from pathofexile.com's public character-window JSON
+-- through PoB's own ImportTab code: the same path as the desktop app's
+-- "Import from website" button, so items, gems and the tree come out exactly
+-- as PoB builds them.
+--   params.character  the get-characters entry (name, class, league, level...)
+--   params.passives   the get-passive-skills response
+--   params.items      the get-items response
+--   params.mainSkill  optional active gem name to make the main skill
+--
+-- What PoB's importer does that this wraps (ImportTab.lua):
+--   * ImportPassiveTreeAndJewels sets bandit and both pantheon gods from the
+--     response, falling back to None when the response omits them (the public
+--     API always does), and re-estimates resistancePenalty from the passive
+--     points used. The values held before the import are put back for those
+--     four options unless the response carried its own.
+--   * ImportItemsAndSkills (clearSkills) restores a socket group's state,
+--     including which group is the main skill, only when the group comes back
+--     with the same slot and gems; otherwise the old index is left in place
+--     and may point at another group. The main skill is therefore checked by
+--     name, and PoB's GuessMainSocketGroup is the fallback.
+--   * Deleting the replaced gear uses ItemsTab:DeleteItem, which removes the
+--     item from every item set, as the desktop import does.
+local IMPORT_SLOTS = { "Weapon 1", "Weapon 2", "Weapon 1 Swap", "Weapon 2 Swap", "Helmet", "Body Armour",
+  "Gloves", "Boots", "Amulet", "Ring 1", "Ring 2", "Belt", "Flask 1", "Flask 2", "Flask 3", "Flask 4", "Flask 5" }
+
+local function activeSkillName(group)
+  if not group then return nil end
+  local display = group.displaySkillList and group.displaySkillList[group.mainActiveSkill or 1]
+  local effect = display and display.activeEffect and display.activeEffect.grantedEffect
+  return effect and effect.name or nil
+end
+
+-- Same lookup SkillsTab uses: the effect normally lives on gemData. Vaal gems
+-- carry the non-Vaal skill as gemData.secondaryGrantedEffect. Names compare
+-- case-insensitively so a typed main_skill need not match PoB's casing.
+local function sameName(a, b)
+  return type(a) == 'string' and type(b) == 'string' and a:lower() == b:lower()
+end
+
+local function groupHasActiveGem(group, gemName)
+  for _, gem in ipairs(group and group.gemList or {}) do
+    local gemData = gem.gemData
+    local effects = { gem.grantedEffect, gemData and gemData.grantedEffect, gemData and gemData.secondaryGrantedEffect }
+    for i = 1, 3 do
+      local effect = effects[i]
+      if effect and not effect.support and sameName(effect.name, gemName) then return true end
+    end
+  end
+  return false
+end
+
+-- PoB's importer enables only a gem's first effect (enableGlobal1), while gems
+-- added in the UI start with both enabled (SkillsTab.lua). When the wanted main
+-- skill is a Vaal gem's normal effect, enable it as the UI checkbox would.
+local function enableSecondaryEffect(group, gemName)
+  for _, gem in ipairs(group and group.gemList or {}) do
+    local gemData = gem.gemData
+    local secondary = gemData and gemData.secondaryGrantedEffect
+    if secondary and not secondary.support and sameName(secondary.name, gemName) and gem.enableGlobal2 ~= true then
+      gem.enableGlobal2 = true
+      return true
+    end
+  end
+  return false
+end
+
+-- A group can show several skills (a Vaal gem shows the Vaal and the normal
+-- one, Vaal first). Point the group's main skill at the wanted one; the
+-- display list is only built by a calculation pass.
+local function selectSkillInGroup(group, gemName)
+  for i, display in ipairs(group and group.displaySkillList or {}) do
+    local effect = display.activeEffect and display.activeEffect.grantedEffect
+    if effect and sameName(effect.name, gemName) then
+      if group.mainActiveSkill ~= i then
+        group.mainActiveSkill = i
+        group.mainActiveSkillCalcs = i
+        return true
+      end
+      return false
+    end
+  end
+  return false
+end
+
+function M.import_character(params)
+  if not build or not build.importTab or not build.configTab or not build.skillsTab then
+    return nil, 'build not initialized'
+  end
+  if type(params) ~= 'table' or type(params.character) ~= 'table' then return nil, 'missing character' end
+  if type(params.passives) ~= 'table' or type(params.items) ~= 'table' then return nil, 'missing passives or items' end
+  if type(params.character.class) ~= 'string' or type(params.character.league) ~= 'string' then
+    return nil, 'character entry needs class and league'
+  end
+  local importTab = build.importTab
+  local before = {}
+  for _, key in ipairs({ 'bandit', 'pantheonMajorGod', 'pantheonMinorGod', 'resistancePenalty' }) do
+    before[key] = build.configTab.input[key]
+  end
+  local mainSkill = params.mainSkill
+    or activeSkillName(build.skillsTab.socketGroupList[build.mainSocketGroup])
+
+  local passives = copyTable(params.passives)
+  local treeData = copyTable(params.character)
+  treeData.passives = passives
+  treeData.jewels = passives.items
+  local ok, err = pcall(importTab.ImportPassiveTreeAndJewels, importTab, treeData, true)
+  if not ok then return nil, 'passive tree import failed: ' .. tostring(err) end
+
+  local itemData = copyTable(params.character)
+  itemData.equipment = params.items.items or {}
+  itemData.guardian = params.items.guardian
+  ok, err = pcall(importTab.ImportItemsAndSkills, importTab, itemData, true, true, params.ignoreWeaponSwap == true)
+  if not ok then return nil, 'item import failed: ' .. tostring(err) end
+
+  -- The importer writes through the config dropdowns into the active config
+  -- set's input table, which build.configTab.input aliases.
+  local input = build.configTab.input
+  local fromResponse = {
+    bandit = passives.bandit_choice,
+    pantheonMajorGod = passives.pantheon_major,
+    pantheonMinorGod = passives.pantheon_minor,
+  }
+  local restored = {}
+  for key, value in pairs(before) do
+    if fromResponse[key] == nil and value ~= nil and input[key] ~= value then
+      restored[key] = { imported = input[key], kept = value }
+      input[key] = value
+    end
+  end
+  if next(restored) then
+    if build.configTab.UpdateControls then build.configTab:UpdateControls() end
+    build.configTab:BuildModList()
+  end
+
+  -- 'kept': the group at the main index already holds the wanted skill.
+  -- 'matched by name': another group holds it. 'guessed by PoB': no wanted
+  -- skill (empty base) or no group holds it, so PoB's own guess is used rather
+  -- than whatever group now sits at the stale index.
+  local mainSkillSource
+  local groups = build.skillsTab.socketGroupList
+  if mainSkill and groupHasActiveGem(groups[build.mainSocketGroup], mainSkill) then
+    mainSkillSource = 'kept'
+  else
+    if mainSkill then
+      for i, group in ipairs(groups) do
+        if groupHasActiveGem(group, mainSkill) then
+          build.mainSocketGroup = i
+          mainSkillSource = 'matched by name'
+          break
+        end
+      end
+    end
+    if not mainSkillSource then
+      build.mainSocketGroup = importTab:GuessMainSocketGroup()
+      mainSkillSource = 'guessed by PoB'
+    end
+  end
+  build.calcsTab.input.skill_number = build.mainSocketGroup
+  build.buildFlag = true
+  if runCallback then runCallback("OnFrame") end
+  M.get_main_output()
+  if mainSkill then
+    local mainGroup = groups[build.mainSocketGroup]
+    local recalc = function()
+      build.buildFlag = true
+      if runCallback then runCallback("OnFrame") end
+      M.get_main_output()
+    end
+    if enableSecondaryEffect(mainGroup, mainSkill) then recalc() end
+    if selectSkillInGroup(mainGroup, mainSkill) then recalc() end
+  end
+
+  local allocated = 0
+  for _ in pairs(build.spec.allocNodes or {}) do allocated = allocated + 1 end
+  local items = {}
+  for _, slotName in ipairs(IMPORT_SLOTS) do
+    local slot = build.itemsTab.slots[slotName]
+    local item = slot and slot.selItemId and build.itemsTab.items[slot.selItemId]
+    if item then table.insert(items, { slot = slotName, name = item.title or item.name, base = item.baseName }) end
+  end
+  return {
+    name = params.character.name,
+    league = params.character.league,
+    class = build.spec.curClassName,
+    ascendancy = build.spec.curAscendClassName,
+    level = build.characterLevel,
+    allocatedNodes = allocated,
+    socketGroups = #groups,
+    mainSkill = activeSkillName(groups[build.mainSocketGroup]),
+    mainSkillWanted = mainSkill,
+    mainSkillSource = mainSkillSource,
+    mainSocketGroup = build.mainSocketGroup,
+    restoredConfig = restored,
+    items = items,
+  }
+end
 
 return M

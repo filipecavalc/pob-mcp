@@ -19,6 +19,7 @@ import { handleGetBuildIssues, formatIssuesResponse } from "../handlers/buildGoa
 import { handleFindBestAnointment } from "../handlers/anointHandlers.js";
 import { handleLuaStart, handleLuaStop, handleLuaNewBuild, handleLuaSaveBuild, handleLuaLoadBuild, handleLuaImportCode, handleLuaGetAilments, handleLuaSimulate,
   handleLuaGetStats, handleLuaGetBuildSnapshot, handleLuaGetTree, handleLuaSetTree, handleSearchTreeNodes, handleLuaGetBuildInfo, handleLuaReloadBuild, handleUpdateTreeDelta, handleCreateSpec, handleListSpecs, handleSelectSpec, handleDeleteSpec, handleRenameSpec, handleListItemSets, handleSelectItemSet } from "../handlers/luaHandlers.js";
+import { handleImportCharacter } from "../handlers/characterImportHandlers.js";
 import { handleAddItem, handleGetEquippedItems, handleToggleFlask, handleGetSkillSetup, handleSetMainSkill, handleCreateSocketGroup, handleAddGem, handleSetGemLevel, handleSetGemQuality, handleRemoveSkill, handleRemoveGem, handleSetupSkillWithGems, handleAddMultipleItems, handleSetSocketGroupEnabled, handleSetGemEnabled } from "../handlers/itemSkillHandlers.js";
 import { handleAnalyzeDefenses, handleSuggestOptimalNodes, handleOptimizeTree } from "../handlers/optimizationHandlers.js";
 import { handleAnalyzeItems, handleOptimizeSkillLinks, handleCreateBudgetBuild } from "../handlers/advancedOptimizationHandlers.js";
@@ -165,6 +166,18 @@ export async function routeToolCall(
         args.build_xml as string | undefined,
         args.name as string | undefined
       );
+
+    case "import_character":
+      return await handleImportCharacter(luaContext, {
+        accountName: args?.account_name as string | undefined,
+        character: args?.character as string | undefined,
+        realm: args?.realm as 'pc' | 'xbox' | 'sony' | undefined,
+        baseBuild: args?.base_build as string | undefined,
+        saveAs: args?.save_as as string | undefined,
+        overwrite: args?.overwrite === true,
+        mainSkill: args?.main_skill as string | undefined,
+        ignoreWeaponSwap: args?.ignore_weapon_swap === true,
+      });
 
     case "lua_import_code":
       if (!args) throw new Error("Missing arguments");

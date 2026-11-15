@@ -365,6 +365,50 @@ export function getLuaToolSchemas(): ToolSchema[] {
       },
     },
     {
+      name: "import_character",
+      description: "Pull a character's current tree, items and gems from pathofexile.com (public profile, no login; the account's Characters tab must be public) and import them with PoB's own importer, the same code as the desktop app's 'Import from website'. Imports on top of base_build (or save_as when that file exists) so its config and skill settings are kept; bandit, pantheon and resistance penalty, which PoB's importer overwrites, are kept from the base. Like the desktop import, replaced gear is removed from every item set of the base, and only the active spec, item set and config set receive the import. Everything is fetched before the loaded build is touched, and a failed import reloads the base. Reports gear and stat changes against the base and saves to save_as. Defaults come from POE_ACCOUNT_NAME, POE_CHARACTER and POB_CHARACTER_BUILD. pathofexile.com refreshes items only when the character changes zone or logs out.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          account_name: {
+            type: "string",
+            description: "pathofexile.com account name with its discriminator, e.g. 'Name#1234'. Defaults to POE_ACCOUNT_NAME.",
+          },
+          character: {
+            type: "string",
+            description: "Character name. Defaults to POE_CHARACTER. When neither is set, the error lists the account's characters.",
+          },
+          realm: {
+            type: "string",
+            enum: ["pc", "xbox", "sony"],
+            description: "Realm (default: pc).",
+          },
+          base_build: {
+            type: "string",
+            description: "Build file to import on top of. Defaults to save_as when that file exists; otherwise a new build.",
+          },
+          save_as: {
+            type: "string",
+            description: "Build file to save the result to (.xml added if missing). Defaults to POB_CHARACTER_BUILD; not saved when neither is set.",
+          },
+          overwrite: {
+            type: "boolean",
+            description: "Allow replacing save_as when it is not the base build (default: false).",
+            default: false,
+          },
+          main_skill: {
+            type: "string",
+            description: "Active gem to make the main skill (e.g. 'Righteous Fire'). Defaults to the base build's main skill.",
+          },
+          ignore_weapon_swap: {
+            type: "boolean",
+            description: "Skip weapon-swap items and their gems (default: false).",
+            default: false,
+          },
+        },
+      },
+    },
+    {
       name: "lua_load_build",
       description: "Load a build file into the PoB calculation engine. Required before using other lua_* tools. AUTO-RETURNS a brief summary (life, DPS, EHP, resistances, top issues) — do NOT immediately follow with lua_get_stats or get_build_issues just to get basic numbers. Call additional tools only when you need details beyond the summary.",
       inputSchema: {

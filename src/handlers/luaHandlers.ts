@@ -6,7 +6,7 @@ import { wrapHandler } from "../utils/errorHandling.js";
 import { buildFileName, resolveBuildFile } from "../utils/pathSanitizer.js";
 import type { BuildService } from "../services/buildService.js";
 
-interface LuaHandlerContext {
+export interface LuaHandlerContext {
   buildService?: Pick<BuildService, 'invalidateBuild'>;
   pobDirectory: string;
   luaEnabled: boolean;
@@ -1043,15 +1043,15 @@ const ATTRIBUTE_REQUIREMENTS = [
 ];
 
 /** `Minion.TotalDPS` reads a nested key: calcWith leaves minion stats under out.Minion. */
-const statNumber = (out: any, key: string): number | undefined => {
+export const statNumber = (out: any, key: string): number | undefined => {
   const value = key.split('.').reduce((node: any, part) => node?.[part], out);
   return typeof value === 'number' ? value : undefined;
 };
 
-const formatStat = (value: number): string =>
+export const formatStat = (value: number): string =>
   Math.abs(value) >= 100 ? Math.round(value).toLocaleString() : Number(value.toFixed(2)).toString();
 
-const formatDelta = (delta: number, before: number): string => {
+export const formatDelta = (delta: number, before: number): string => {
   const sign = delta > 0 ? '+' : '';
   const percent = before !== 0 ? ` (${sign}${((delta / Math.abs(before)) * 100).toFixed(1)}%)` : '';
   return `${sign}${formatStat(delta)}${percent}`;

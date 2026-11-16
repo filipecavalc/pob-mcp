@@ -261,5 +261,23 @@ return function(BuildOps, Compat, host)
     return { ok = true, capabilities = { mode = host.mode, adapter = host.adapter, actions = actions } }
   end
 
+  -- Build sites (Modules/BuildSiteTools.lua) and PoB Archives (Classes/PoBArchivesProvider.lua)
+  handlers.list_build_sites = op(BuildOps.list_build_sites, 'result')
+  handlers.resolve_build_link = op(BuildOps.resolve_build_link, 'result')
+  handlers.archives_request = op(BuildOps.archives_request, 'result')
+  handlers.archives_parse = op(BuildOps.archives_parse, 'result')
+  -- Load a build downloaded from a site link. Build:Init(..., importLink)
+  -- (Modules/Build.lua) only stores the link in build.importLink, which
+  -- ImportTab:Save writes to the file; the XML's own link applies only when
+  -- none was given, so setting it after the load gives the same result.
+  handlers.load_imported_build = function(params)
+    params = params or {}
+    local res = handlers.load_build_xml(params)
+    if res.ok and build and type(params.importLink) == 'string' and params.importLink ~= '' then
+      build.importLink = params.importLink
+    end
+    return res
+  end
+
   return handlers
 end

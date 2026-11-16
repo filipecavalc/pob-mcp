@@ -1776,4 +1776,136 @@ function M.import_character(params)
   }
 end
 
+-- ---------------------------------------------------------------------------
+-- Build sites and build archives
+-- PoB's own tables and functions decide links, URLs and parsing; only the
+-- network requests run in TS (the headless engine has no HTTP client).
+-- ---------------------------------------------------------------------------
+
+local BUILD_SITE_FIELDS = { 'label', 'id', 'matchURL', 'regexURL', 'downloadURL', 'codeOut', 'postUrl', 'postFields', 'linkURL' }
+
+local function describeBuildSite(site)
+  local out = {}
+  for _, key in ipairs(BUILD_SITE_FIELDS) do out[key] = site[key] end
+  -- ImportTab.lua getExportSitesFromImportList: a site offers "Share" when it
+  -- has postUrl, postFields and codeOut.
+  out.canShare = (site.postUrl and site.postFields and site.codeOut) and true or false
+  return out
+end
+
+-- buildSites.websiteList (Modules/BuildSiteTools.lua, loaded by Modules/Main.lua).
+function M.list_build_sites()
+  if type(buildSites) ~= 'table' or type(buildSites.websiteList) ~= 'table' then
+    return nil, "PoB's buildSites (Modules/BuildSiteTools.lua) is not loaded"
+  end
+  local sites = {}
+  for _, site in ipairs(buildSites.websiteList) do table.insert(sites, describeBuildSite(site)) end
+  return { sites = sites }
+end
+
+-- Resolve an import link to the URL PoB downloads its build code from, by
+-- running PoB's own code with its download step intercepted:
+--   https links: ImportBuild (Modules/Common.lua), which trims the input,
+--     unwraps youtube/google redirect links, matches buildSites.websiteList
+--     and calls buildSites.DownloadBuild (regexURL -> downloadURL);
+--   pob:// links: Main:Init's protocol handler (Modules/Main.lua), which
+--     calls buildSites.DownloadBuild(uri, nil) and
+--     buildSites.ParseImportLinkFromURI for the link it stores.
+-- Anything else is treated as a build code, as ImportBuild does.
+function M.resolve_build_link(params)
+  local input = params.link
+  if type(input) ~= 'string' or input == '' then return nil, 'link is required' end
+  if type(buildSites) ~= 'table' or type(buildSites.DownloadBuild) ~= 'function' then
+    return nil, "PoB's buildSites (Modules/BuildSiteTools.lua) is not loaded"
+  end
+  if type(ImportBuild) ~= 'function' or type(launch) ~= 'table' then
+    return nil, "PoB's ImportBuild (Modules/Common.lua) is not loaded"
+  end
+  local seen = {}
+  local origDownloadBuild = buildSites.DownloadBuild
+  local rawDownloadPage = rawget(launch, 'DownloadPage')
+  buildSites.DownloadBuild = function(link, websiteInfo, callback)
+    seen.called, seen.link, seen.site = true, link, websiteInfo
+    return origDownloadBuild(link, websiteInfo, callback)
+  end
+  launch.DownloadPage = function(_, url) seen.url = url end
+  local isUri = input:match('^pob:') ~= nil
+  local ok, err = pcall(function()
+    if isUri then
+      seen.importLink = buildSites.ParseImportLinkFromURI(input)
+      buildSites.DownloadBuild(input, nil, function() end)
+    else
+      -- ImportBuild decodes the input as a code when no site matches; that
+      -- result is discarded here (TS decodes codes itself).
+      ImportBuild(input, function() end)
+    end
+  end)
+  buildSites.DownloadBuild = origDownloadBuild
+  rawset(launch, 'DownloadPage', rawDownloadPage)
+  if not ok then return nil, 'resolving the link failed: ' .. tostring(err) end
+
+  if not seen.called then return { kind = 'code' } end
+  local link = isUri and seen.importLink or seen.link
+  local site = seen.site
+  if not site and link then
+    -- DownloadBuild found the site by its id; name it from the https link.
+    for _, info in ipairs(buildSites.websiteList) do
+      if link:match(info.matchURL) then site = info break end
+    end
+  end
+  if not seen.url then
+    return nil, 'no site in PoB\'s list matches "' .. tostring(link or input) .. '" (Download information not found)'
+  end
+  return {
+    kind = 'link',
+    link = link,
+    downloadUrl = seen.url,
+    site = site and describeBuildSite(site) or nil,
+  }
+end
+
+-- PoB Archives (Classes/PoBArchivesProvider.lua, base Classes/ExtBuildListProvider.lua).
+-- mode 'builds' has the lists Trending and Latest (Modules/BuildList.lua);
+-- mode 'similar' has Similar Builds (Modules/Build.lua OpenSimilarPopup),
+-- which posts the build's import code. Returns PoB's own request details.
+function M.archives_request(params)
+  local mode = params.mode == 'similar' and 'similar' or 'builds'
+  local ok, provider = pcall(Compat.construct, 'PoBArchivesProvider', mode)
+  if not ok then return nil, 'PoBArchivesProvider unavailable: ' .. tostring(provider) end
+  local titles = provider:GetListTitles()
+  local list = params.list or titles[1]
+  local known = false
+  for _, title in ipairs(titles) do
+    if title:lower() == tostring(list):lower() then list, known = title, true end
+  end
+  if not known then return nil, 'unknown list "' .. tostring(list) .. '"; PoB Archives offers: ' .. table.concat(titles, ', ') end
+  -- SetActiveList would call GetBuilds (the download); set the list directly.
+  provider.activeList = list
+  if mode == 'similar' then
+    -- The code itself is sent by TS; any non-nil value selects the recommendations API.
+    provider:SetImportCode('')
+  end
+  return {
+    mode = mode,
+    list = list,
+    lists = titles,
+    url = provider:GetApiUrl(),
+    method = mode == 'similar' and 'POST' or 'GET',
+    -- PoBArchivesProvider:GetRecommendations posts "importCode=" .. code.
+    postField = mode == 'similar' and 'importCode=' or nil,
+    pageUrl = provider:GetPageUrl(),
+  }
+end
+
+-- Parse an archives API response with PoBArchivesProvider:ParseBuilds.
+function M.archives_parse(params)
+  if type(params.body) ~= 'string' then return nil, 'body is required' end
+  local mode = params.mode == 'similar' and 'similar' or 'builds'
+  local ok, provider = pcall(Compat.construct, 'PoBArchivesProvider', mode)
+  if not ok then return nil, 'PoBArchivesProvider unavailable: ' .. tostring(provider) end
+  local parsed, err = pcall(provider.ParseBuilds, provider, params.body)
+  if not parsed then return nil, 'PoB could not parse the archives response: ' .. tostring(err) end
+  return { builds = provider.buildList, statusMsg = provider.statusMsg }
+end
+
 return M

@@ -19,6 +19,13 @@ Compat.accept_launcher_headers()
 -- The upstream wrapper initializes PoB and exposes newBuild/loadBuildFromXML plus `build`.
 dofile('HeadlessWrapper.lua')
 
+-- A PoB checkout runs in Dev Mode, whose buildMode:Shutdown saves the closing
+-- build unasked (an unnamed one as "~~temp~~.xml" in the builds folder) each
+-- time a build is replaced. Headless, that write fails and leaves an "Error"
+-- dialog behind in main.popups for good. Turn it off, as the desktop server
+-- does (PoB's own "Disable Dev AutoSave" option).
+if main then main.disableDevAutoSave = true end
+
 -- HeadlessWrapper stubs Inflate() to return "", which makes PoB's timeless jewel
 -- loader overwrite its .bin cache with an empty file and skip conquered nodes.
 -- Provide a real implementation via the system zlib (LuaJIT FFI).
@@ -50,6 +57,23 @@ do
   end)
   if not ok then
     io.stderr:write('vanilla_stdio_bridge: real Inflate unavailable (' .. tostring(err) .. '); timeless jewels will not be calculated\n')
+  end
+end
+
+-- PoB's jewel loader (Modules/DataJewelFileLoader.lua) caches the inflated
+-- timeless jewel data as Data/TimelessJewelData/<type>.bin beside the .zip.
+-- HeadlessWrapper's NewFileSearch is a stub, so that cache is never read back,
+-- only rewritten on every load, and it would land in the PoB checkout, which
+-- this bridge only reads. Refuse that one write; the loader treats a failed
+-- open as "no cache" and keeps the data it inflated.
+do
+  local rawOpen = io.open
+  io.open = function(path, mode, ...)
+    if type(path) == 'string' and type(mode) == 'string' and mode:find('[wa]')
+      and path:find('TimelessJewelData[/\\][^/\\]+%.bin$') then
+      return nil, 'timeless jewel cache is not written by the headless bridge'
+    end
+    return rawOpen(path, mode, ...)
   end
 end
 

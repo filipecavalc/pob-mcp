@@ -13,6 +13,7 @@
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { HOOKED_FILES } from './lib/pob-gui-hooks.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const target = process.argv[2];
@@ -28,51 +29,17 @@ if (!existsSync(mainLua)) {
   process.exit(2);
 }
 
-// 1. Plan the Main.lua hook first, so an unrecognised PoB version changes nothing.
-const BEGIN = '\t-- pob-mcp: begin';
-const END = '\t-- pob-mcp: end';
-const HOOK = [
-  BEGIN,
-  '\tif not self.mcpServerTried then',
-  '\t\tself.mcpServerTried = true',
-  '\t\tlocal ok, mod = pcall(LoadModule, "Modules/McpServer")',
-  '\t\tif ok and mod then self.mcpServer = mod.start(self) else ConPrintf("MCP server: %s", tostring(mod)) end',
-  '\tend',
-  '\tif self.mcpServer then self.mcpServer:Poll() end',
-  END,
-].join('\n');
-const main = readFileSync(mainLua, 'utf8');
-const eol = main.includes('\r\n') ? '\r\n' : '\n';
-const anchor = /^function main:OnFrame\(\)\r?\n/m;
-if (!anchor.test(main)) {
-  console.error('could not find "function main:OnFrame()" in Modules/Main.lua; PoB changed, update this script. Nothing was written.');
-  process.exit(1);
-}
-const existingHook = /\t-- pob-mcp: begin[\s\S]*?-- pob-mcp: end\r?\n/;
-const patched = main.replace(existingHook, '').replace(anchor, (m) => m + HOOK.replace(/\n/g, eol) + eol);
-
-// 1b. Plan the Build.lua hook: the tab-content dispatch draws the MCP tab while
-//     it is shown, ahead of PoB's own viewMode branches (the MCP tab never sets
-//     viewMode, which PoB saves into build files).
-const buildLua = path.join(targetSrc, 'Modules', 'Build.lua');
-const build = readFileSync(buildLua, 'utf8');
-const buildEol = build.includes('\r\n') ? '\r\n' : '\n';
-const DISPATCH_MARK = 'self.mcpTab:Draw(tabViewPort, inputEvents) -- pob-mcp';
-let buildPatched = build;
-if (!build.includes(DISPATCH_MARK)) {
-  const dispatch = /^\tif self\.viewMode == "IMPORT" then\r?\n/gm;
-  const matches = build.match(dispatch) || [];
-  if (matches.length !== 1) {
-    console.error(`expected one 'if self.viewMode == "IMPORT" then' line in Modules/Build.lua, found ${matches.length}; PoB changed, update this script. Nothing was written.`);
+// 1. Plan both hooks first, so an unrecognised PoB version changes nothing.
+const hooks = Object.entries(HOOKED_FILES).map(([rel, patch]) => {
+  const file = path.join(target, ...rel.split('/'));
+  const original = readFileSync(file, 'utf8');
+  const result = patch(original);
+  if (result.error) {
+    console.error(`${result.error}; PoB changed, update scripts/lib/pob-gui-hooks.mjs. Nothing was written.`);
     process.exit(1);
   }
-  buildPatched = build.replace(dispatch, [
-    '\tif self.mcpTab and self.mcpTab.shown then -- pob-mcp',
-    `\t\t${DISPATCH_MARK}`,
-    '\telseif self.viewMode == "IMPORT" then',
-    '',
-  ].join(buildEol));
-}
+  return { rel, file, original, patched: result.text };
+});
 
 // 2. Collect files: everything under pob-gui/src, and the shared bridge Lua into src/Modules/PobMcp.
 const overlay = path.join(repoRoot, 'pob-gui', 'src');
@@ -96,15 +63,11 @@ for (const { from, rel } of copies) {
     writeFileSync(dest, content);
   }
 }
-if (patched === main) {
-  console.log('unchanged  src/Modules/Main.lua (hook present)');
-} else {
-  console.log(`${checkOnly ? 'would patch' : 'patched'}  src/Modules/Main.lua (OnFrame hook)`);
-  if (!checkOnly) writeFileSync(mainLua, patched);
-}
-if (buildPatched === build) {
-  console.log('unchanged  src/Modules/Build.lua (tab hook present)');
-} else {
-  console.log(`${checkOnly ? 'would patch' : 'patched'}  src/Modules/Build.lua (MCP tab dispatch)`);
-  if (!checkOnly) writeFileSync(buildLua, buildPatched);
+for (const { rel, file, original, patched } of hooks) {
+  if (patched === original) {
+    console.log(`unchanged  ${rel} (hook present)`);
+  } else {
+    console.log(`${checkOnly ? 'would patch' : 'patched'}  ${rel} (hook)`);
+    if (!checkOnly) writeFileSync(file, patched);
+  }
 }

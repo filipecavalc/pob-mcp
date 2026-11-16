@@ -2009,9 +2009,11 @@ local function selectEntry(control, index)
   if control.selFunc then control.selFunc(index, control.list[index]) end
 end
 
+-- A dropdown list's labels without colour codes, for messages and listings
+-- (no list gives none; an entry without a label gives "", never a hole).
 local function labelsOf(list)
   local out = {}
-  for i, entry in ipairs(list or {}) do out[i] = cleanText(entryLabel(entry)) end
+  for i, entry in ipairs(list or {}) do out[i] = tostring(cleanText(entryLabel(entry)) or '') end
   return out
 end
 
@@ -3293,6 +3295,7 @@ function M.compare_remove(params)
   return list
 end
 
+-- buffModeDropList in CalcsTab.lua: the tab's "Calculation Mode".
 local CALCS_BUFF_MODES = { UNBUFFED = true, BUFFED = true, COMBAT = true, EFFECTIVE = true }
 
 -- params: { index?, tree_set?, item_set?, skill_set?, config_set?, main_socket_group?,
@@ -4129,7 +4132,9 @@ local function compareItemForSlot(ct, entry, slot)
   return nil, 'unknown slot: ' .. slot
 end
 
-local REALM_DISPLAY = { pc = 'PC', sony = 'PS4', ps4 = 'PS4', xbox = 'Xbox' }
+-- PoB's realm codes (realmCode in ImportTab.lua, REALM_API_IDS in
+-- CompareBuySimilar.lua), shown in the popup's realm dropdown as PC, PS4, Xbox.
+local REALM_DISPLAY = { pc = 'PC', sony = 'PS4', xbox = 'Xbox' }
 local LISTED_INDEX = { securable = 1, available = 2, online = 3, any = 4 }
 
 -- params: { index?, slot, league?, realm?, listed?, use_base_type?, ilvl_min?, ilvl_max?,
@@ -5202,9 +5207,6 @@ local function columnHeaders(subSec)
   return headers
 end
 
--- buffModeDropList in CalcsTab.lua: the tab's "Calculation Mode".
-local CALC_MODES = { UNBUFFED = true, BUFFED = true, COMBAT = true, EFFECTIVE = true }
-
 -- Run fn with the Calcs tab showing the player or the minion (its "Show
 -- Minion Stats" checkbox) in the given calculation mode (its "Calculation
 -- Mode" dropdown), and put both back afterwards. Both are saved with the
@@ -5226,7 +5228,7 @@ end
 local function withCalcsView(params, fn)
   local calcsTab = build.calcsTab
   local mode = params.mode and tostring(params.mode):upper() or nil
-  if mode and not CALC_MODES[mode] then
+  if mode and not CALCS_BUFF_MODES[mode] then
     return nil, 'unknown calculation mode "' .. tostring(params.mode) .. '"; use UNBUFFED, BUFFED, COMBAT or EFFECTIVE'
   end
   local previousMinion, previousMode = calcsTab.input.showMinion, calcsTab.input.misc_buffMode
@@ -5767,13 +5769,6 @@ local function withDialog(open, use)
   return res, err
 end
 
--- Pick an entry of a PoB dropdown the way a click does: set the index, then
--- run the control's selFunc (DropDownControl calls selFunc(index, value)).
-local function pickDropDown(control, index)
-  control.selIndex = index
-  if control.selFunc then control.selFunc(index, control.list[index]) end
-end
-
 local function lowerText(value)
   return stripColourCodes(tostring(value or '')):lower()
 end
@@ -6003,12 +5998,6 @@ local function matchListEntry(list, wanted, fields)
   return found
 end
 
-local function labelsOf(list)
-  local labels = {}
-  for _, entry in ipairs(list) do table.insert(labels, stripColourCodes(entry.label or tostring(entry))) end
-  return labels
-end
-
 -- "Search for Node" entries (buildMods in TreeTab:FindTimelessJewel) are
 -- labelled "<name>     <first stat line>"; the name is what precedes the gap.
 local function timelessModName(entry)
@@ -6052,6 +6041,7 @@ local function describeTimelessOptions(controls)
 end
 
 local TRADE_TYPES = { securable = 1, available = 2, onlineleague = 3, online = 4, any = 5 }
+-- The same realm codes, as positions in TreeTab's realmList ("PC", "Sony", "Xbox").
 local REALMS = { pc = 1, sony = 2, xbox = 3 }
 
 -- Fill in the "Find a Timeless Jewel" dialog (TreeTab:FindTimelessJewel) as a
@@ -6072,13 +6062,13 @@ local function runTimelessDialog(params)
     if params.jewelType ~= nil then
       local idx = matchListEntry(controls.jewelSelect.list, params.jewelType, { 'label', 'name' })
       if not idx then error('unknown jewelType "' .. tostring(params.jewelType) .. '"; PoB offers: ' .. table.concat(labelsOf(controls.jewelSelect.list), ', '), 0) end
-      pickDropDown(controls.jewelSelect, idx)
+      selectEntry(controls.jewelSelect, idx)
     end
     if params.optionsOnly then
       -- The protectable list only fills with "Filter Nodes" on (setAllocatedNodes).
       if params.socketId ~= nil then
         local sidx = matchListEntry(controls.socketSelect.list, params.socketId == 'all' and -1 or params.socketId, { 'label', 'keystone' })
-        if sidx then pickDropDown(controls.socketSelect, sidx) end
+        if sidx then selectEntry(controls.socketSelect, sidx) end
         controls.socketFilter.state = true
         controls.socketFilter.changeFunc(true)
       end
@@ -6089,9 +6079,9 @@ local function runTimelessDialog(params)
     if conqueror ~= nil then
       local idx, why = matchListEntry(controls.conquerorSelect.list, conqueror, { 'label' })
       if not idx then error((why == 'ambiguous' and 'ambiguous' or 'unknown') .. ' conqueror "' .. tostring(conqueror) .. '"; PoB offers: ' .. table.concat(labelsOf(controls.conquerorSelect.list), ', '), 0) end
-      pickDropDown(controls.conquerorSelect, idx)
+      selectEntry(controls.conquerorSelect, idx)
     else
-      pickDropDown(controls.conquerorSelect, 1)
+      selectEntry(controls.conquerorSelect, 1)
     end
 
     local socketWanted = params.socketId
@@ -6099,7 +6089,7 @@ local function runTimelessDialog(params)
     if socketWanted == 'all' then socketWanted = -1 end
     local sidx = matchListEntry(controls.socketSelect.list, socketWanted, {})
     if not sidx then error('node ' .. tostring(params.socketId) .. ' is not one of the jewel sockets PoB offers; list them with list_options', 0) end
-    pickDropDown(controls.socketSelect, sidx)
+    selectEntry(controls.socketSelect, sidx)
 
     local filterOn = params.socketFilter == true
     controls.socketFilter.state = filterOn
@@ -6114,7 +6104,7 @@ local function runTimelessDialog(params)
       if params[key] ~= nil then
         local idx = matchListEntry(control.list, params[key], { 'label' })
         if not idx then error('unknown ' .. key .. ' "' .. tostring(params[key]) .. '"; PoB offers: ' .. table.concat(labelsOf(control.list), ', '), 0) end
-        pickDropDown(control, idx)
+        selectEntry(control, idx)
       end
     end
 
@@ -6161,7 +6151,7 @@ local function runTimelessDialog(params)
         end
       end
       if not idx then error('unknown fallbackStat "' .. tostring(params.fallbackStat) .. '"; PoB offers: ' .. table.concat(labelsOf(controls.fallbackWeightsList.list), ', '), 0) end
-      pickDropDown(controls.fallbackWeightsList, idx)
+      selectEntry(controls.fallbackWeightsList, idx)
       controls.fallbackWeightsButton.onClick()
     end
     controls.totalMinimumWeight:SetText(params.totalMinimumWeight ~= nil and tostring(math.floor(tonumber(params.totalMinimumWeight) or 0)) or '', true)
@@ -6170,7 +6160,7 @@ local function runTimelessDialog(params)
       if not controls.abyssAscendancyLabel.shown then error('abyssAscendancy applies to Reclaimed Malevolence only', 0) end
       local idx = matchListEntry(controls.abyssAscendancySelect.list, params.abyssAscendancy, { 'label', 'id' })
       if not idx then error('unknown abyssAscendancy "' .. tostring(params.abyssAscendancy) .. '"; PoB offers: ' .. table.concat(labelsOf(controls.abyssAscendancySelect.list), ', '), 0) end
-      pickDropDown(controls.abyssAscendancySelect, idx)
+      selectEntry(controls.abyssAscendancySelect, idx)
     end
 
     for _, name in ipairs(params.protectNodes or {}) do
@@ -6227,7 +6217,7 @@ local function runTimelessDialog(params)
       controls.realmSelection.selIndex = realm
       controls.searchTradeLeagueSelect.list = { t.league }
       controls.searchTradeLeagueSelect.selIndex = 1
-      pickDropDown(controls.tradeTypeSelection, tradeType)
+      selectEntry(controls.tradeTypeSelection, tradeType)
       controls.searchMore.state = t.searchMore == true
       if t.startRow ~= nil then
         controls.searchResults.selIndex = math.min(math.max(math.floor(tonumber(t.startRow) or 1), 1), #results)

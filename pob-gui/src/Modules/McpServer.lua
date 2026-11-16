@@ -35,6 +35,13 @@ local MODIFIES_BUILD = {
   remove_skill = true, remove_gem = true, create_socket_group = true, add_gem = true, select_spec = true,
   create_spec = true, delete_spec = true, rename_spec = true, select_item_set = true,
   set_socket_group_enabled = true, import_character = true,
+  item_set_manage = true,
+}
+-- Actions that open the Items tab's own popups for the length of the call
+-- (crafting, item sets); never stacked on a dialog the user has open.
+local OPENS_POPUPS = {
+  item_craft_create = true, item_craft_affixes = true, item_craft_properties = true, item_add_modifier = true,
+  item_add_implicit = true, item_corrupt = true, item_enchant = true, item_set_manage = true,
 }
 -- Actions that work without a build open.
 local NO_BUILD_NEEDED = { ping = true, version = true, get_capabilities = true, gui_status = true,
@@ -156,7 +163,7 @@ function Server:Handle(request)
   local action, params = request.action, request.params or {}
   local build = openBuild(main)
 
-  if (REPLACES_BUILD[action] or MODIFIES_BUILD[action]) and main.popups[1] then
+  if (REPLACES_BUILD[action] or MODIFIES_BUILD[action] or OPENS_POPUPS[action]) and main.popups[1] then
     return { ok = false, error = "a dialog is open in Path of Building; finish or close it first" }
   end
   if REPLACES_BUILD[action] and build and params.force ~= true then

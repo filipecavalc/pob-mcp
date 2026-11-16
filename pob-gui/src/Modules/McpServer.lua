@@ -35,6 +35,8 @@ local MODIFIES_BUILD = {
   remove_skill = true, remove_gem = true, create_socket_group = true, add_gem = true, select_spec = true,
   create_spec = true, delete_spec = true, rename_spec = true, select_item_set = true,
   set_socket_group_enabled = true, import_character = true,
+  -- Tree tab: tattoos change nodes (node_power and find_timeless_jewel only read).
+  apply_tattoo = true, remove_tattoos = true,
 }
 -- Actions that work without a build open.
 local NO_BUILD_NEEDED = { ping = true, version = true, get_capabilities = true, gui_status = true,

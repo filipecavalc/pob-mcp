@@ -7,6 +7,7 @@ import fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { atomicWriteFile } from "./utils/atomicWrite.js";
 import { resolvePoBLayout } from "./utils/pobLayout.js";
+import type { NodePowerParams, NodePowerReport, TimelessSearchParams, TimelessOptions, TimelessSearchResult, TattooList, TattooApplied, TattoosRemoved } from "./types/treePower.js";
 
 /** Lua bridge request envelope */
 // params is only ever serialised, so an interface with declared keys is as valid
@@ -998,5 +999,39 @@ async setTree(params: {
     } catch (e) { noteIgnoredError('graceful quit handshake (hard kill follows)', e); }
     this.proc.kill();
     this.proc = null;
+  }
+
+  /** PoB's node power report (Tree tab: Show Node Power / Show Power Report) for one stat. */
+  async nodePower(params: NodePowerParams): Promise<NodePowerReport> {
+    const res = await this.send({ action: "node_power", params });
+    if (!res.ok) throw new Error(res.error || "node_power failed");
+    return res.result as NodePowerReport;
+  }
+
+  /** The Tree tab's "Find Timeless Jewel" dialog: its option lists, or a seed search and trade URLs. */
+  async findTimelessJewel(params: TimelessSearchParams & { optionsOnly: true }): Promise<TimelessOptions>;
+  async findTimelessJewel(params: TimelessSearchParams): Promise<TimelessSearchResult>;
+  async findTimelessJewel(params: TimelessSearchParams): Promise<TimelessOptions | TimelessSearchResult> {
+    const res = await this.send({ action: "find_timeless_jewel", params });
+    if (!res.ok) throw new Error(res.error || "find_timeless_jewel failed");
+    return res.result as TimelessOptions | TimelessSearchResult;
+  }
+
+  async listTattoos(params: { nodeId: number; includeLegacy?: boolean }): Promise<TattooList> {
+    const res = await this.send({ action: "list_tattoos", params });
+    if (!res.ok) throw new Error(res.error || "list_tattoos failed");
+    return res.result as TattooList;
+  }
+
+  async applyTattoo(params: { nodeId: number; tattoo: string; includeLegacy?: boolean }): Promise<TattooApplied> {
+    const res = await this.send({ action: "apply_tattoo", params });
+    if (!res.ok) throw new Error(res.error || "apply_tattoo failed");
+    return res.result as TattooApplied;
+  }
+
+  async removeTattoos(params: { nodeId?: number; all?: boolean }): Promise<TattoosRemoved> {
+    const res = await this.send({ action: "remove_tattoos", params });
+    if (!res.ok) throw new Error(res.error || "remove_tattoos failed");
+    return res.result as TattoosRemoved;
   }
 }

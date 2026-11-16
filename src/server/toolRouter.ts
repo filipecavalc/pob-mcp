@@ -38,6 +38,7 @@ import { handleSuggestWatchersEye } from "../handlers/jewelAdvisorHandlers.js";
 import { handleSuggestCrafting } from "../handlers/craftingAdvisorHandler.js";
 import { handleFindItemUpgrades as handleFindItemUpgradesNew } from "../handlers/itemShoppingHandler.js";
 import { handleClassifyItemAffixes, handleListCraftableMods, handleFindAffixTiers } from "../handlers/affixHandlers.js";
+import { handleGetNodePower, handleFindTimelessJewel, handleListTattoos, handleApplyTattoo, handleRemoveTattoos, type GetNodePowerArgs, type FindTimelessJewelArgs } from "../handlers/treePowerHandlers.js";
 
 export interface ToolRouterDependencies {
   contextBuilder: ContextBuilder;
@@ -838,6 +839,22 @@ export async function routeToolCall(
         include_unobtainable: Boolean(args?.include_unobtainable),
         max_results: args?.max_results === undefined ? undefined : Number(args.max_results),
       });
+
+    // Tree tab: node power report, timeless jewel finder, tattoos.
+    case "get_node_power":
+      return await handleGetNodePower(luaContext, (args ?? {}) as GetNodePowerArgs);
+
+    case "find_timeless_jewel":
+      return await handleFindTimelessJewel(luaContext, (args ?? {}) as FindTimelessJewelArgs);
+
+    case "list_tattoos":
+      return await handleListTattoos(luaContext, (args ?? {}) as { node_id: number; include_legacy?: boolean });
+
+    case "apply_tattoo":
+      return await handleApplyTattoo(luaContext, (args ?? {}) as { node_id: number; tattoo: string; include_legacy?: boolean });
+
+    case "remove_tattoos":
+      return await handleRemoveTattoos(luaContext, (args ?? {}) as { node_id?: number; all?: boolean; confirm?: boolean });
 
     default:
       throw new Error(`Unknown tool: ${name}`);

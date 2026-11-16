@@ -1068,6 +1068,120 @@ export function getLuaToolSchemas(): ToolSchema[] {
         required: ["slot"],
       },
     },
+    {
+      name: "get_node_power",
+      truncatable: true,
+      description: "PoB's own node power report for the loaded build (Tree tab: 'Show Node Power' + 'Show Power Report'): every passive node valued by PoB's calculator for one stat, with the path cost (points) PoB reports and the value per point including the path. Runs PoB's power builder to completion (about 4-12 s on a full tree; less with max_depth). Unlike suggest_optimal_nodes (keyword matching), every number is a real PoB calculation.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          stat: {
+            type: "string",
+            description: "Stat key or label from PoB's power stat list, e.g. FullDPS, CombinedDPS, TotalDot, IgniteDPS, Life, LifeRegen, EnergyShield, Armour, Evasion, TotalEHP, SecondMinimalMaximumHitTaken, FireTakenHit, SpellSuppressionChance, BlockChance, Str (default: FullDPS). An unknown name lists them all. 'Offence/Defence' has no report in PoB.",
+          },
+          max_depth: { type: "number", description: "PoB's node distance limit (its 'All/5/10/15/Custom' dropdown); default all. Lower is faster." },
+          filter: {
+            type: "string",
+            enum: ["unallocated", "unallocated_and_clusters", "allocated"],
+            description: "PoB's report filter (default unallocated: nodes with a gain). allocated: what removing each allocated node would cost.",
+          },
+          sort_by: {
+            type: "string",
+            enum: ["power", "per_point", "points", "type"],
+            description: "PoB's report columns: power (node alone, default), per_point (node with its path, per point), points (path cost), type.",
+          },
+          types: {
+            type: "array",
+            items: { type: "string" },
+            description: "Only these node types, e.g. ['Notable'] or ['Notable','Keystone']; types are Normal, Notable, Keystone, Mastery.",
+          },
+          show_masteries: { type: "boolean", description: "Include mastery effects (PoB's 'Show Masteries', default true)." },
+          limit: { type: "number", description: "Rows to show (default 10, max 500)." },
+        },
+      },
+    },
+    {
+      name: "find_timeless_jewel",
+      description: "PoB's 'Find Timeless Jewel' search on the loaded build: scores every seed of a timeless jewel in a socket by the desired node stats, as the Tree tab's dialog does, and builds PoB's 'Open Trade URL' links (returned as text, no browser, no trade API call). Start with list_options: true to get the jewel sockets, conquerors and the searchable node ids for a jewel type. The build's saved finder settings are left untouched.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          list_options: { type: "boolean", description: "Only list the dialog's options for jewel_type: sockets, conquerors, searchable nodes, devotion and fallback modes. With socket_id, also the allocated notables protect_nodes can take." },
+          jewel_type: { type: "string", description: "Glorious Vanity, Lethal Pride, Brutal Restraint, Militant Faith, Elegant Hubris, Heroic Tragedy, or the abyss ones (Festering Vengeance, Extinguishing Grasp, Baleful Dominion, Destructive Aspiration, Reclaimed Malevolence); or PoB's id 1-11." },
+          conqueror: { type: "string", description: "Conqueror name or id, e.g. 'Kaom', 'Xibaqua' (default Any: the trade URL then searches all three)." },
+          socket_id: { type: ["number", "string"], description: "Jewel socket node id, or 'all' for PoB's multi-socket search." },
+          desired_nodes: {
+            type: "array",
+            description: "PoB's 'Desired Nodes' list. node: an id or name from list_options. weight / weight2: the primary and secondary node weights (default 1 / 1; PoB's sliders go 0-10). min_weight: seeds whose total for this node is lower are dropped. required: at least one hit.",
+            items: {
+              type: "object",
+              properties: {
+                node: { type: "string" },
+                weight: { type: "number" },
+                weight2: { type: "number" },
+                min_weight: { type: "number" },
+                required: { type: "boolean" },
+              },
+              required: ["node"],
+            },
+          },
+          search_list: { type: "string", description: "Raw PoB desired-nodes text ('id, weight, weight2, minWeight' per line), added before desired_nodes." },
+          fallback_list: { type: "string", description: "Raw PoB 'Fallback Nodes' text, used for nodes not in the desired list." },
+          fallback_stat: { type: "string", description: "Fill the fallback list with PoB's 'Generate' button for this stat (e.g. FullDPS, Life, TotalEHP): weights from PoB's calculator for every node of the jewel type." },
+          socket_filter: { type: "boolean", description: "PoB's 'Filter Nodes': only count nodes allocated in the tree." },
+          socket_filter_distance: { type: "number", description: "With socket_filter: also count unallocated nodes within this many points (0-10)." },
+          devotion_1: { type: "string", description: "Militant Faith devotion modifier for the trade URL (e.g. 'Elemental Damage')." },
+          devotion_2: { type: "string", description: "Second Militant Faith devotion modifier." },
+          total_minimum_weight: { type: "number", description: "Drop seeds whose total weight is lower." },
+          protect_nodes: { type: "array", items: { type: "string" }, description: "Allocated notables that must not change (Militant Faith or Reclaimed Malevolence, with socket_filter)." },
+          abyss_ascendancy: { type: "string", description: "Reclaimed Malevolence: required ascendancy outcome." },
+          max_results: { type: "number", description: "Seeds to show (default 10, max 500). Trade URLs are never cut short, so keep this modest." },
+          league: { type: "string", description: "League for the trade URL. EXACT league name the user gives; without it no URL is made." },
+          realm: { type: "string", enum: ["pc", "sony", "xbox"], description: "Trade realm (default pc)." },
+          trade_type: { type: "string", enum: ["securable", "available", "onlineleague", "online", "any"], description: "PoB's listing filter (default securable: instant buyout)." },
+          search_more: { type: "boolean", description: "PoB's 'Search Maximum Amount': up to 180 seeds per URL instead of about 10." },
+          trade_pages: { type: "number", description: "How many consecutive URLs to make ('Open Next Trade URL'), default 1, max 10." },
+          start_rank: { type: "number", description: "Result rank the first URL starts from (default 1)." },
+        },
+      },
+    },
+    {
+      name: "list_tattoos",
+      description: "List the tattoos (or runegrafts, for an unallocated mastery) PoB offers for a passive node, from its tattoo editor (right click on a node in the Tree tab), with the node's current tattoo and the build's tattoo count. Tattoos go on attribute small passives, +30 attribute notables and keystones.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node_id: { type: "number", description: "Passive node id (search_tree_nodes finds ids)." },
+          include_legacy: { type: "boolean", description: "Include legacy tattoos (PoB's 'Show Legacy Tattoos', default false)." },
+        },
+        required: ["node_id"],
+      },
+    },
+    {
+      name: "apply_tattoo",
+      description: "Apply a tattoo to a passive node of the loaded build with PoB's tattoo editor ('Add'), replacing any tattoo already there, and report the stat changes. Changes the build in memory; save with lua_save_build.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node_id: { type: "number", description: "Passive node id." },
+          tattoo: { type: "string", description: "Tattoo name (or a unique part of it) from list_tattoos, e.g. 'Tattoo of the Tukohama Shaman'." },
+          include_legacy: { type: "boolean", description: "Allow legacy tattoos (default false)." },
+        },
+        required: ["node_id", "tattoo"],
+      },
+    },
+    {
+      name: "remove_tattoos",
+      description: "Remove tattoos from the loaded build: one node's (the tattoo editor's 'Reset Node'), or all of them (the Tree tab's 'Remove All Tattoos', which needs confirm: true). Reports the stat changes. Changes the build in memory; save with lua_save_build.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node_id: { type: "number", description: "Node whose tattoo to remove." },
+          all: { type: "boolean", description: "Remove every tattoo." },
+          confirm: { type: "boolean", description: "Required with all: true." },
+        },
+      },
+    },
   ];
 }
 

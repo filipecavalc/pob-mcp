@@ -253,6 +253,13 @@ return function(BuildOps, Compat, host)
   handlers.evaluate_anoint_candidates = evaluate_anoint_candidates
   handlers.generate_weighted_trade_query = generate_weighted_trade_query
 
+  -- Tree tab: node power report, timeless jewel finder, tattoos.
+  handlers.node_power = op(BuildOps.node_power, 'result')
+  handlers.find_timeless_jewel = op(BuildOps.find_timeless_jewel, 'result')
+  handlers.list_tattoos = op(BuildOps.list_tattoos, 'result')
+  handlers.apply_tattoo = op(BuildOps.apply_tattoo, 'result')
+  handlers.remove_tattoos = op(BuildOps.remove_tattoos, 'result')
+
   handlers.get_capabilities = function()
     -- quit ends the stdio bridge's read loop; the desktop app's server has no such loop.
     local actions = host.mode == 'vanilla' and { 'quit' } or {}

@@ -312,7 +312,8 @@ describe('Lua bridge actions', () => {
     expect(modifies).not.toContain('find_timeless_jewel = true');
     // The finder and the tattoo list put back state a dialog the user has open may hold.
     expect(server).toMatch(/local OPENS_DIALOG = \{ find_timeless_jewel = true, list_tattoos = true \}/);
-    expect(server).toContain('or OPENS_DIALOG[action]) and main.popups[1]');
+    // The dialog guard line lists OPENS_DIALOG among the sets it refuses while a dialog is open.
+    expect(server).toMatch(/if \([^\n]*\bOPENS_DIALOG\[action\][^\n]*\) and main\.popups\[1\] then/);
   });
 });
 

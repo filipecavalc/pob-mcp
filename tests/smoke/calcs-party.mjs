@@ -76,6 +76,25 @@ try {
   assert.notEqual(disabled.imported.auras, '');
   assert.equal((await client.getStats(fields)).Evasion, base.Evasion);
   assert.equal((await client.partyRebuild()).active.auras.length, 2);
+
+  // A build saved with CRLF, as PoB's own saves on Windows, sent to the bridge
+  // as is (past the client's own conversion): the bridge converts it as PoB's
+  // text-mode file read does, on every load path, so the party parses the same.
+  const crlfXml = (await client.exportBuildXml()).replace(/\r?\n/g, '\r\n');
+  const partyBefore = await client.getParty();
+  for (const action of ['load_imported_build', 'load_build_xml']) {
+    const res = await client.send({ action, params: { xml: crlfXml, name: 'calcs-party-smoke' } });
+    assert.ok(res.ok, `${action}: ${res.error}`);
+    const party = await client.getParty();
+    assert.ok(!JSON.stringify(party).includes('\\r'), `${action}: no CR reaches the Party tab`);
+    assert.deepEqual(party.active, partyBefore.active, `${action}: the same party effects`);
+    assert.deepEqual(await client.getStats(fields), withParty, `${action}: the same stats as before the reload`);
+  }
+  const compared = await client.send({ action: 'compare_import', params: { xml: crlfXml, label: 'crlf' } });
+  assert.ok(compared.ok, `compare_import: ${compared.error}`);
+  assert.ok(!JSON.stringify(compared.result).includes('\\r'), 'compare_import: no CR in the comparison entry');
+  await client.send({ action: 'compare_remove', params: { index: compared.result.count } });
+
   const cleared = await client.partyClear();
   assert.equal(cleared.active.auras.length + cleared.active.curses.length, 0);
   assert.equal(cleared.imported.auras, '');

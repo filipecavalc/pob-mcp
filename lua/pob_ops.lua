@@ -3253,6 +3253,13 @@ function M.compare_list()
   }
 end
 
+-- PoB reads build files in text mode (buildMode:LoadDBFile, io.open "r"), so
+-- on Windows the CRLF its own saves write reaches it as LF. XML handed over as
+-- a string skips that read; this does the same conversion.
+function M.normalize_newlines(text)
+  return (text:gsub('\r\n', '\n'))
+end
+
 -- params: { xml: string, label?: string }
 -- CompareTabClass:ImportBuild, as the Import popup ("build code") and the
 -- "Import from Folder" popup call it after reading the code or file.
@@ -3262,7 +3269,7 @@ function M.compare_import(params)
   if type(params) ~= 'table' or type(params.xml) ~= 'string' or params.xml == '' then return nil, 'missing xml' end
   local label = (type(params.label) == 'string' and params.label ~= '') and params.label or 'Imported build'
   local before = #ct.compareEntries
-  local ok, imported = pcall(ct.ImportBuild, ct, params.xml, label)
+  local ok, imported = pcall(ct.ImportBuild, ct, M.normalize_newlines(params.xml), label)
   if not ok then return nil, 'import failed: ' .. tostring(imported) end
   if not imported or #ct.compareEntries == before then
     return nil, 'Path of Building could not load this build for comparison (CompareEntry produced no output); check the XML'
@@ -5624,7 +5631,7 @@ function M.party_import(params)
   -- A build file saved on Windows has CRLF, which PoB never sees, as it
   -- reads files in text mode; ParseBuffs splits lines on LF and would
   -- keep the CR, filing every buff under a type name ending in it.
-  local xmlText = params.xml:gsub('\r\n', '\n')
+  local xmlText = M.normalize_newlines(params.xml)
   -- finishImport reports a bad XML through launch:ShowErrMsg, which no
   -- caller sees; check what it needs first.
   local dbXML, parseErr = common.xml.ParseXML(xmlText)

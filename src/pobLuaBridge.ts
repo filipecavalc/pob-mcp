@@ -75,6 +75,17 @@ export type StatsExport = { [stat: string]: number | string | undefined } & { _m
  * every numeric consumer must narrow through this helper (or Number()) rather
  * than assume the wire type. NaN/undefined => not reported by PoB.
  */
+/**
+ * PoB reads build files in text mode (buildMode:LoadDBFile, io.open "r"), so
+ * on Windows it never sees the CRLF its own saves write; multi-line text such
+ * as the Party tab's imported buffs breaks on a stray CR. Every way a build's
+ * XML reaches PoB as a string goes through this (the bridge does the same,
+ * BuildOps.normalize_newlines in lua/pob_ops.lua).
+ */
+export function toLf(xml: string): string {
+  return xml.replace(/\r\n/g, "\n");
+}
+
 export function toFiniteNumber(v: unknown): number | undefined {
   if (v === null || v === undefined || v === '') return undefined;
   const n = Number(v);
@@ -695,10 +706,7 @@ export class PoBLuaApiClient {
     // A failed import may already have closed the previous native build.
     this.loadedFilePath = undefined;
     this.buildGeneration++;
-    // PoB reads build files in text mode (buildMode:LoadDBFile, io.open "r"),
-    // so on Windows it never sees the CRLF its own saves write. Multi-line
-    // text such as the Party tab's imported buffs breaks on a stray "\r".
-    const res = await this.send({ action: "load_build_xml", params: { xml: xml.replace(/\r\n/g, "\n"), name } });
+    const res = await this.send({ action: "load_build_xml", params: { xml: toLf(xml), name } });
     if (!res.ok) throw new Error(res.error || "load_build_xml failed");
     this.loadedFilePath = sourcePath ? path.resolve(sourcePath) : undefined;
     return { ok: true };
@@ -1021,7 +1029,7 @@ async setTree(params: {
 
   /** PoB's Party tab Import button, given a decoded build XML that carries a party export. */
   async partyImport(params: { xml: string; destination?: PartyDestination; append?: boolean }): Promise<PartyState & { exportedSections?: string[] }> {
-    const res = await this.send({ action: "party_import", params });
+    const res = await this.send({ action: "party_import", params: { ...params, xml: toLf(params.xml) } });
     if (!res.ok) throw new Error(res.error || "party_import failed");
     return res.result as PartyState & { exportedSections?: string[] };
   }
@@ -1090,7 +1098,7 @@ async setTree(params: {
   async loadImportedBuild(xml: string, name: string, importLink?: string): Promise<BuildLoadResult> {
     this.loadedFilePath = undefined;
     this.buildGeneration++;
-    const res = await this.send({ action: "load_imported_build", params: { xml, name, importLink } });
+    const res = await this.send({ action: "load_imported_build", params: { xml: toLf(xml), name, importLink } });
     if (!res.ok) throw new Error(res.error || "load_imported_build failed");
     return { ok: true };
   }
@@ -1109,7 +1117,7 @@ async setTree(params: {
   }
 
   async compareImport(xml: string, label?: string): Promise<CompareImportResult> {
-    return this.compareAction<CompareImportResult>("compare_import", { xml, label });
+    return this.compareAction<CompareImportResult>("compare_import", { xml: toLf(xml), label });
   }
 
   async compareRemove(index: number): Promise<CompareList> {

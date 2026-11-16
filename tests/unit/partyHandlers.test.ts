@@ -138,6 +138,20 @@ describe('loading a build saved on Windows', () => {
     await new Recording().loadBuildXml('<PathOfBuilding>\r\n<Party><ImportedBuffs name="Aura">Grace\r\n100\r\n---</ImportedBuffs></Party>\r\n</PathOfBuilding>');
     expect(sent[0].params?.xml).toBe('<PathOfBuilding>\n<Party><ImportedBuffs name="Aura">Grace\n100\n---</ImportedBuffs></Party>\n</PathOfBuilding>');
   });
+
+  it('does the same for a build loaded from a site link and for a comparison build', async () => {
+    const { PoBLuaApiClient } = await import('../../src/pobLuaBridge.js');
+    const sent: Array<{ action: string; params?: { xml?: string } }> = [];
+    class Recording extends PoBLuaApiClient {
+      protected override async send(obj: { action: string; params?: object }) { sent.push(obj as never); return { ok: true, result: {} }; }
+    }
+    const crlf = '<PathOfBuilding>\r\n<Party><EnemyMods>Enemy is Hindered\r\n</EnemyMods></Party>\r\n</PathOfBuilding>';
+    const client = new Recording();
+    await client.loadImportedBuild(crlf, 'Linked', 'https://example.invalid/b');
+    await client.compareImport(crlf, 'Other');
+    expect(sent.map((s) => s.action)).toEqual(['load_imported_build', 'compare_import']);
+    for (const s of sent) expect(s.params?.xml).not.toContain('\r');
+  });
 });
 
 describe('helpers', () => {

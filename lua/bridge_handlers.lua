@@ -155,7 +155,12 @@ return function(BuildOps, Compat, host)
   handlers.load_build_xml = function(params)
     if not params or type(params.xml) ~= 'string' then return { ok = false, error = 'missing xml' } end
     if not host.loadBuildFromXML then return { ok = false, error = 'host cannot load builds' } end
-    local ok, err = pcall(host.loadBuildFromXML, params.xml, (params.name and tostring(params.name)) or 'API Build')
+    -- PoB reads build files in text mode (buildMode:LoadDBFile, io.open "r"),
+    -- so on Windows it never sees the CRLF its own saves write. Multi-line
+    -- text such as the Party tab's imported buffs breaks on a stray "\r".
+    -- Every load (load_imported_build too) passes here.
+    local xml = BuildOps.normalize_newlines(params.xml)
+    local ok, err = pcall(host.loadBuildFromXML, xml, (params.name and tostring(params.name)) or 'API Build')
     if not ok then return { ok = false, error = tostring(err) } end
     -- PoB can close the build or stop at a conversion popup without throwing.
     -- Shutdown clears savers, so stale build fields alone do not prove a load.

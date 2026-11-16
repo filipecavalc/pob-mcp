@@ -141,6 +141,28 @@ export class PoBGuiApiClient extends PoBLuaApiClient {
     return { lines: Number(res.lines) || 0, shown: res.shown === true, truncated: res.truncated === true };
   }
 
+  /** Whether PoB holds a Path of Exile login (poe_api_status action); no token leaves PoB. */
+  async poeApiStatus(): Promise<{ authenticated: boolean; tokenExpiry?: number }> {
+    const res = await this.send({ action: "poe_api_status" });
+    if (!res.ok) throw new Error(res.error || "poe_api_status failed");
+    return { authenticated: res.authenticated === true, tokenExpiry: typeof res.tokenExpiry === "number" ? res.tokenExpiry : undefined };
+  }
+
+  /**
+   * Download one character through PoB's own Path of Exile login, as its
+   * "Import From Your Account" buttons do (poe_api_character action). Returns
+   * GGG's character object unchanged.
+   */
+  async poeApiCharacter(name: string, realm = "pc"): Promise<Record<string, unknown>> {
+    const res = await this.send({ action: "poe_api_character", params: { name, realm } });
+    if (!res.ok) {
+      // notFound: the logged-in account has no such character (GGG answered 404).
+      throw Object.assign(new Error(res.error || "poe_api_character failed"), { notFound: res.notFound === true });
+    }
+    if (!res.character || typeof res.character !== "object") throw new Error("poe_api_character returned no character");
+    return res.character as Record<string, unknown>;
+  }
+
   /** Open a saved build file in the window as PoB's build list does (open_build action). */
   async openBuild(filePath: string, force = false): Promise<Record<string, unknown>> {
     const res = await this.send({ action: "open_build", params: { path: filePath, force } });

@@ -38,14 +38,19 @@ local MODIFIES_BUILD = {
 }
 -- Actions that work without a build open.
 local NO_BUILD_NEEDED = { ping = true, version = true, get_capabilities = true, gui_status = true,
-  new_build = true, load_build_xml = true, open_build = true, show_panel = true }
+  new_build = true, load_build_xml = true, open_build = true, show_panel = true,
+  poe_api_status = true, poe_api_character = true }
+-- Realm codes PoB's own login import uses (realmList in Classes/ImportTab.lua).
+local POE_API_REALMS = { pc = true, xbox = true, sony = true }
+-- A deferred reply that never comes (a download PoB lost) must not block the connection forever.
+local DEFERRED_TIMEOUT_S = 60
 
 local LOG_SIZE = 60
 -- TextListControl draws every line each frame (clipped, not culled), so keep panels modest.
 local MAX_PANEL_BYTES = 64 * 1024
 local MAX_PANEL_LINES = 1000
 -- Status polling is not worth a line in the recent-commands list.
-local NOT_LOGGED = { ping = true, version = true, get_capabilities = true, gui_status = true }
+local NOT_LOGGED = { ping = true, version = true, get_capabilities = true, gui_status = true, poe_api_status = true }
 -- Build.lua switches tabs on these Ctrl shortcuts by setting viewMode only.
 local TAB_SHORTCUTS = { ["1"] = true, ["2"] = true, ["3"] = true, ["4"] = true, ["5"] = true, ["6"] = true,
   ["7"] = true, i = true }
@@ -72,6 +77,17 @@ local function applyModeChange(main)
     if main.newModeChangeToTree then main.modes[main.mode].viewMode = "TREE" end
     main.newModeChangeToTree = false
   end
+end
+
+local NOT_LOGGED_IN = "Path of Building is not logged in to Path of Exile: in PoB (MCP), Import/Export, click \"Authorize with Path of Exile\""
+
+-- PoB creates its API client only when an Import tab or trade query is built
+-- (ImportTab.lua, TradeQuery.lua), from the login saved in its settings.
+local function ensureApi(main)
+  if not main.api then
+    main.api = new("PoEAPI", main.lastToken, main.lastRefreshToken, main.tokenExpiry)
+  end
+  return main.api
 end
 
 local function openBuild(main)
@@ -188,6 +204,45 @@ function Server:Handle(request)
     _G.build = openBuild(main)
     if not _G.build or not _G.build.savers then return { ok = false, error = "PoB did not open the build" } end
     return { ok = true, status = guiStatus(main) }
+  elseif action == "poe_api_status" then
+    -- Whether PoB holds a Path of Exile login (Import/Export, "Authorize with
+    -- Path of Exile"). Only the fact and the expiry leave PoB, never a token.
+    local api = ensureApi(main)
+    return { ok = true, authenticated = api ~= nil and api.authToken ~= nil,
+      tokenExpiry = api and api.authToken and tonumber(api.tokenExpiry) or nil }
+  elseif action == "poe_api_character" then
+    -- Download one character through PoB's own login, exactly as its "Import
+    -- From Your Account" buttons do (PoEAPI:DownloadCharacter: token refresh,
+    -- PoB's rate limiter). Returns GGG's character object as is; the token
+    -- stays in PoB. PoB answers asynchronously, so the reply is deferred.
+    local realm = params.realm or "pc"
+    if not POE_API_REALMS[realm] then return { ok = false, error = "realm must be pc, xbox or sony" } end
+    -- PoB puts the name into the URL path unescaped; refuse anything that could change the path.
+    if type(params.name) ~= "string" or not params.name:match("^[%w_]+$") then
+      return { ok = false, error = "name must be a character name (letters, digits, underscore)" }
+    end
+    local api = ensureApi(main)
+    if not api.authToken then
+      return { ok = false, error = NOT_LOGGED_IN }
+    end
+    return { deferred = function(reply)
+      api:DownloadCharacter(realm, params.name, function(body, err, timeNext)
+        if type(body) == "table" and type(body.character) == "table" then
+          reply({ ok = true, character = body.character })
+        elseif err == "Response code: 429" then
+          local wait = timeNext and math.max(0, timeNext - os.time()) or nil
+          reply({ ok = false, error = "rate limited by pathofexile.com" .. (wait and string.format("; retry in %d s", wait) or ""), retryAfter = wait })
+        elseif not api.authToken or (err and err:match("401")) then
+          -- PoEAPI wipes the login (ResetDetails) when a token refresh fails.
+          reply({ ok = false, error = "the Path of Exile login in PoB is no longer valid (" .. tostring(err) .. "); log in again in Import/Export" })
+        elseif err and err:match("404") then
+          reply({ ok = false, notFound = true, error = "pathofexile.com has no character \"" .. params.name
+            .. "\" on the account logged in to PoB (" .. err .. "); the login only reaches that account's characters, and the name must match exactly" })
+        else
+          reply({ ok = false, error = "pathofexile.com: " .. tostring(err or "no character in the response") })
+        end
+      end)
+    end }
   end
 
   -- Shared bridge actions read the global `build`, as in the headless bridge.
@@ -238,6 +293,29 @@ function Server:OnLine(c, line)
   local ok, res = pcall(self.Handle, self, request)
   if not ok then res = { ok = false, error = tostring(res) } end
   if type(res) ~= "table" then res = { ok = false, error = "handler returned no response" } end
+  if type(res.deferred) == "function" then
+    -- The connection reads nothing more until this request is answered, so
+    -- replies stay in request order.
+    local answered = false
+    local function reply(final)
+      if answered then return end
+      answered = true
+      c.pending = nil
+      if type(final) ~= "table" then final = { ok = false, error = "handler returned no response" } end
+      self:Log(request.action, final.ok == true, final.error)
+      c.out = c.out .. encode(final)
+    end
+    -- Answer before the client gives up (its deadline), so it gets this
+    -- error rather than a timeout that drops the connection.
+    local limit = DEFERRED_TIMEOUT_S
+    if type(request.deadline) == "number" then
+      limit = math.min(limit, request.deadline / 1000 - socket.gettime() - 1)
+    end
+    c.pending = { since = socket.gettime(), limit = math.max(0, limit), reply = reply }
+    local started, err = pcall(res.deferred, reply)
+    if not started then reply({ ok = false, error = tostring(err) }) end
+    return true
+  end
   if not NOT_LOGGED[request.action] then self:Log(request.action, res.ok == true, res.error) end
   c.out = c.out .. encode(res)
   return true
@@ -363,6 +441,7 @@ function Server:OtherWorkRunning()
   end
   for _, c in ipairs(self.clients) do
     if c.out ~= "" then return true end -- a reply still being sent
+    if c.pending then return true end -- a download PoB is running for a request
   end
   return false
 end
@@ -395,8 +474,11 @@ function Server:Poll()
   local busy = self.main.newMode ~= nil
   for i = #self.clients, 1, -1 do
     local c = self.clients[i]
+    if c.pending and socket.gettime() - c.pending.since > c.pending.limit then
+      c.pending.reply({ ok = false, error = string.format("pathofexile.com did not answer within %d s", math.floor(c.pending.limit)) })
+    end
     local keep = flush(c)
-    while keep and not busy and c.out == "" do
+    while keep and not busy and c.out == "" and not c.pending do
       local line, err, partial = c.sock:receive("*l", c.partial)
       if line then
         c.partial = ""
@@ -452,7 +534,7 @@ function M.start(main)
   local capabilities = handlers.get_capabilities
   handlers.get_capabilities = function(params)
     local res = capabilities(params)
-    for _, extra in ipairs({ "gui_status", "open_build", "show_panel" }) do table.insert(res.capabilities.actions, extra) end
+    for _, extra in ipairs({ "gui_status", "open_build", "show_panel", "poe_api_status", "poe_api_character" }) do table.insert(res.capabilities.actions, extra) end
     table.sort(res.capabilities.actions)
     return res
   end

@@ -393,7 +393,7 @@ export function getLuaToolSchemas(): ToolSchema[] {
     },
     {
       name: "import_character",
-      description: "Pull a character's current tree, items and gems from pathofexile.com (public profile, no login; the account's Characters tab must be public) and import them with PoB's own importer, the same code as the desktop app's 'Import from website'. Imports on top of base_build (or save_as when that file exists) so its config and skill settings are kept; bandit, pantheon and resistance penalty, which PoB's importer overwrites, are kept from the base. Like the desktop import, replaced gear is removed from every item set of the base, and only the active spec, item set and config set receive the import. Everything is fetched before the loaded build is touched, and a failed import reloads the base. Reports gear and stat changes against the base and saves to save_as. Defaults come from POE_ACCOUNT_NAME, POE_CHARACTER and POB_CHARACTER_BUILD. pathofexile.com refreshes items only when the character changes zone or logs out.",
+      description: "Pull a character's current tree, items and gems from pathofexile.com (through the Path of Building (MCP) window's Path of Exile login when available, see source; otherwise the public profile, which needs the account's Characters tab public) and import them with PoB's own importer, the same code as the desktop app's 'Import from website'. Imports on top of base_build (or save_as when that file exists) so its config and skill settings are kept; the resistance penalty, which PoB's importer re-estimates, is kept from the base, and so are bandit and pantheon with the public profile (it does not carry them; the login does). Like the desktop import, replaced gear is removed from every item set of the base, and only the active spec, item set and config set receive the import. Everything is fetched before the loaded build is touched, and a failed import reloads the base. Reports gear and stat changes against the base and saves to save_as. Defaults come from POE_ACCOUNT_NAME, POE_CHARACTER and POB_CHARACTER_BUILD. pathofexile.com refreshes items only when the character changes zone or logs out.",
       inputSchema: {
         type: "object",
         properties: {
@@ -403,12 +403,17 @@ export function getLuaToolSchemas(): ToolSchema[] {
           },
           character: {
             type: "string",
-            description: "Character name. Defaults to POE_CHARACTER. When neither is set, the error lists the account's characters.",
+            description: "Character name. Defaults to POE_CHARACTER. With the public profile, when neither is set the error lists the account's characters; with the login the name must match exactly.",
           },
           realm: {
             type: "string",
             enum: ["pc", "xbox", "sony"],
             description: "Realm (default: pc).",
+          },
+          source: {
+            type: "string",
+            enum: ["auto", "pob_login", "public_profile"],
+            description: "Where the character comes from. pob_login: the Path of Exile login held by the Path of Building (MCP) window (official API, as PoB's 'Import From Your Account'; also brings bandit and pantheon; account_name not needed). public_profile: pathofexile.com's public profile, no login. auto (default): pob_login when that window runs and is logged in, otherwise public_profile; the report says which was used and why.",
           },
           base_build: {
             type: "string",

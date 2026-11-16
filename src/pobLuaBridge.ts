@@ -98,6 +98,8 @@ export interface CharacterImportResult {
   mainSocketGroup?: number;
   /** Config options PoB's importer changed and that were put back: key -> values. */
   restoredConfig?: Record<string, { imported: unknown; kept: unknown }> | unknown[];
+  /** The build's bandit and pantheon after the import. */
+  questChoices?: { bandit?: string; pantheonMajorGod?: string; pantheonMinorGod?: string };
   items?: Array<{ slot: string; name?: string; base?: string }>;
   /** What the response held that PoB did not import or cannot calculate. */
   audit?: {
@@ -755,6 +757,8 @@ export class PoBLuaApiClient {
     items: Record<string, unknown>;
     mainSkill?: string;
     ignoreWeaponSwap?: boolean;
+    /** The response comes from the login API, whose bandit/pantheon are authoritative even when absent. */
+    questChoicesFromResponse?: boolean;
   }): Promise<CharacterImportResult> {
     this.loadedFilePath = undefined;
     this.buildGeneration++;

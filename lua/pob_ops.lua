@@ -1685,9 +1685,14 @@ function M.import_character(params)
     pantheonMajorGod = passives.pantheon_major,
     pantheonMinorGod = passives.pantheon_minor,
   }
+  -- The login API (PoB's "Import From Your Account") carries the quest
+  -- choices, and a missing one means none was made: PoB sets "None" then.
+  -- The public profile never carries them, so there a missing one means unknown.
+  local questChoicesKnown = params.questChoicesFromResponse == true
   local restored = {}
   for key, value in pairs(before) do
-    if fromResponse[key] == nil and value ~= nil and input[key] ~= value then
+    local fromApi = questChoicesKnown and key ~= 'resistancePenalty'
+    if not fromApi and fromResponse[key] == nil and value ~= nil and input[key] ~= value then
       restored[key] = { imported = input[key], kept = value }
       input[key] = value
     end
@@ -1756,6 +1761,11 @@ function M.import_character(params)
     mainSkillSource = mainSkillSource,
     mainSocketGroup = build.mainSocketGroup,
     restoredConfig = restored,
+    questChoices = {
+      bandit = input.bandit,
+      pantheonMajorGod = input.pantheonMajorGod,
+      pantheonMinorGod = input.pantheonMinorGod,
+    },
     items = items,
     -- A surprise in the response shape must not turn a finished import into a failure.
     audit = (function()

@@ -141,6 +141,23 @@ export class LuaClientManager {
   }
 
   /**
+   * Run something against the window, whichever engine runs the tools: the
+   * active connection when it is the window, else a short-lived one.
+   * Undefined when the window target is not configured.
+   */
+  async withGui<T>(fn: (gui: PoBGuiApiClient) => Promise<T>): Promise<T | undefined> {
+    if (!this.guiConfig) return undefined;
+    if (this.client instanceof PoBGuiApiClient && this.client.isAlive()) return fn(this.client);
+    const once = new PoBGuiApiClient({ ...this.guiConfig, connectTimeoutMs: 1500 });
+    try {
+      await once.start();
+      return await fn(once);
+    } finally {
+      await once.stop();
+    }
+  }
+
+  /**
    * Switch engines explicitly. The build loaded in the old engine stays there:
    * the caller must load or open a build in the new one.
    */

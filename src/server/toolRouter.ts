@@ -192,7 +192,8 @@ export async function routeToolCall(
         overwrite: args?.overwrite === true,
         mainSkill: args?.main_skill as string | undefined,
         ignoreWeaponSwap: args?.ignore_weapon_swap === true,
-      });
+        source: args?.source as 'auto' | 'pob_login' | 'public_profile' | undefined,
+      }, { pobLogin: deps.luaTargets?.pobLogin });
 
     case "lua_import_code":
       if (!args) throw new Error("Missing arguments");

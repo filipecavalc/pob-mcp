@@ -1,10 +1,13 @@
 import { wrapHandler } from "../utils/errorHandling.js";
 import type { PoBTarget, TargetStatus } from "../server/luaClientManager.js";
+import type { PobLoginSource } from "./characterImportHandlers.js";
 
 export interface TargetContext {
   targetStatus: () => Promise<TargetStatus>;
   selectTarget: (target: PoBTarget) => Promise<TargetStatus>;
   showPanel: (title: string, text: string, focus?: boolean) => Promise<{ lines: number; shown: boolean; truncated?: boolean }>;
+  /** The window's Path of Exile login, for import_character. */
+  pobLogin?: PobLoginSource;
 }
 
 export async function handlePobShow(context: TargetContext, args: { title?: string; text?: string; focus?: boolean }) {

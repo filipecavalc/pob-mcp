@@ -39,13 +39,83 @@ export interface ImportCharacterArgs {
   overwrite?: boolean;
   mainSkill?: string;
   ignoreWeaponSwap?: boolean;
+  /**
+   * Where the character comes from. 'pob_login': PoB (MCP)'s own Path of
+   * Exile login, the official API, which also carries bandit and pantheon.
+   * 'public_profile': pathofexile.com's public profile, no login. 'auto'
+   * (default): the login when the PoB (MCP) window runs and is logged in.
+   */
+  source?: ImportSource;
+}
+
+export type ImportSource = 'auto' | 'pob_login' | 'public_profile';
+
+/** PoB (MCP)'s Path of Exile login, reached through the window's local server. */
+export interface PobLoginSource {
+  /** Undefined when the window target is not configured; throws when the window does not answer. */
+  status(): Promise<{ authenticated: boolean } | undefined>;
+  /** GGG's character object, downloaded by PoB with its own login. */
+  character(name: string, realm: Realm): Promise<Record<string, unknown>>;
 }
 
 export interface ImportCharacterDeps {
   characterClient?: Pick<PoeCharacterClient, 'listCharacters' | 'getPassives' | 'getItems'> &
     Partial<Pick<PoeCharacterClient, 'rateLimits' | 'resolveAccountName'>>;
+  pobLogin?: PobLoginSource;
   env?: Record<string, string | undefined>;
   fileExists?: (filePath: string) => Promise<boolean>;
+}
+
+interface FetchedCharacter {
+  entry: CharacterEntry;
+  passives: Record<string, unknown>;
+  items: Record<string, unknown>;
+  source: 'pob_login' | 'public_profile';
+}
+
+/**
+ * The login API returns one character object; PoB's login import passes it to
+ * the same importer functions as the public profile's two responses, so it is
+ * split into that shape: passives (with the tree jewels as items) and items.
+ */
+export function splitLoginCharacter(character: Record<string, unknown>): Omit<FetchedCharacter, 'source'> {
+  const { equipment, jewels, passives, inventory: _inventory, rucksack: _rucksack, ...rest } = character;
+  if (typeof rest.name !== 'string' || typeof rest.class !== 'string' || typeof rest.league !== 'string') {
+    throw new Error('the login API response has no character name, class or league');
+  }
+  if (!passives || typeof passives !== 'object') throw new Error('the login API response has no passive tree');
+  return {
+    // level passes through as sent: PoB's importer uses 100 when it is missing.
+    entry: { ...rest, name: rest.name, class: rest.class, league: rest.league, level: rest.level as number },
+    passives: { ...(passives as Record<string, unknown>), items: Array.isArray(jewels) ? jewels : [] },
+    items: { items: Array.isArray(equipment) ? equipment : [] },
+  };
+}
+
+/** Which source 'auto' resolves to, with the reason when it is not the login. */
+const publicNote = (why: string) => `Source: public profile (${why}; bandit and pantheon are kept from the base build).`;
+
+async function chooseSource(requested: ImportSource, pobLogin: PobLoginSource | undefined, explicitAccount: boolean): Promise<{ source: 'pob_login' | 'public_profile'; note?: string }> {
+  if (requested === 'public_profile') return { source: 'public_profile' };
+  const unavailable = (why: string) => {
+    if (requested === 'pob_login') throw new Error(`source pob_login: ${why}`);
+    return { source: 'public_profile' as const, note: publicNote(why) };
+  };
+  // The login reaches only the logged-in account's characters; an account
+  // named in the call may be anyone's.
+  if (requested === 'auto' && explicitAccount) return unavailable('account_name was given, and PoB\'s login reaches only its own account');
+  if (!pobLogin) return unavailable('the Path of Building window target is not configured (POB_GUI_PATH)');
+  let status: { authenticated: boolean } | undefined;
+  try {
+    status = await pobLogin.status();
+  } catch (e) {
+    return unavailable(`Path of Building (MCP) is not running or did not answer: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!status) return unavailable('the Path of Building window target is not configured (POB_GUI_PATH)');
+  if (!status.authenticated) {
+    return unavailable('Path of Building (MCP) is not logged in to Path of Exile; log in under Import/Export, "Authorize with Path of Exile"');
+  }
+  return { source: 'pob_login' };
 }
 
 const describeCharacter = (c: CharacterEntry) => `${c.name} (${c.class}, level ${c.level}, ${c.league})`;
@@ -222,8 +292,9 @@ export async function handleImportCharacter(context: LuaHandlerContext, args: Im
     const characterName = args.character || env.POE_CHARACTER;
     const saveAs = args.saveAs || env.POB_CHARACTER_BUILD;
     const realm: Realm = args.realm ?? 'pc';
-    if (!accountName) {
-      throw new Error('account_name is required (or set POE_ACCOUNT_NAME in the server env). Use the full name with its #1234 discriminator.');
+    const requestedSource = args.source ?? 'auto';
+    if (!['auto', 'pob_login', 'public_profile'].includes(requestedSource)) {
+      throw new Error(`source must be auto, pob_login or public_profile (got ${String(requestedSource)})`);
     }
 
     // Settle every file decision before any request or bridge change.
@@ -243,34 +314,58 @@ export async function handleImportCharacter(context: LuaHandlerContext, args: Im
     const baseXml = basePath ? await fs.readFile(basePath, 'utf-8') : undefined;
 
     // Fetch everything first: a network failure must not disturb the build loaded in the bridge.
-    const client = deps.characterClient ?? sharedPoeCharacterClient();
-    const characters = await client.listCharacters(accountName, realm);
-    const listing = () => characters.map((c) => `  - ${describeCharacter(c)}`).join('\n');
-    if (!characterName) {
-      throw new Error(`character is required (or set POE_CHARACTER). Characters on this account:\n${listing()}`);
+    const chosen = await chooseSource(requestedSource, deps.pobLogin, !!args.accountName);
+    let client: ImportCharacterDeps['characterClient'] | undefined;
+    let fetched: FetchedCharacter | undefined;
+    if (chosen.source === 'pob_login') {
+      if (!characterName) throw new Error('character is required (or set POE_CHARACTER).');
+      try {
+        fetched = { ...splitLoginCharacter(await deps.pobLogin!.character(characterName, realm)), source: 'pob_login' };
+      } catch (error) {
+        // Not on the logged-in account: in auto, the public profile may still have it.
+        if (requestedSource !== 'auto' || !(error as { notFound?: boolean }).notFound || !accountName) throw error;
+        chosen.source = 'public_profile';
+        chosen.note = publicNote(`PoB's login found no "${characterName}" on its account`);
+      }
     }
-    const entry = characters.find((c) => c.name === characterName)
-      ?? characters.find((c) => c.name.toLowerCase() === characterName.toLowerCase());
-    if (!entry) {
-      throw new Error(`character "${characterName}" not found on this account. Characters:\n${listing()}`);
+    if (!fetched) {
+      if (!accountName) {
+        throw new Error('account_name is required for the public profile (or set POE_ACCOUNT_NAME in the server env). Use the full name with its #1234 discriminator.'
+          + (chosen.note ? ` ${chosen.note}` : ''));
+      }
+      const publicClient = deps.characterClient ?? sharedPoeCharacterClient();
+      client = publicClient;
+      const characters = await publicClient.listCharacters(accountName, realm);
+      const listing = () => characters.map((c) => `  - ${describeCharacter(c)}`).join('\n');
+      if (!characterName) {
+        throw new Error(`character is required (or set POE_CHARACTER). Characters on this account:\n${listing()}`);
+      }
+      const found = characters.find((c) => c.name === characterName)
+        ?? characters.find((c) => c.name.toLowerCase() === characterName.toLowerCase());
+      if (!found) {
+        throw new Error(`character "${characterName}" not found on this account. Characters:\n${listing()}`);
+      }
+      let account = accountName;
+      let publicPassives: Record<string, unknown>;
+      try {
+        publicPassives = await publicClient.getPassives(account, found.name, realm);
+      } catch (error) {
+        // PoB reads the exact account spelling from the profile page because
+        // these endpoints used to be case-sensitive (ImportTab.lua). Checked
+        // 2026-11-15: a wrong-case name worked on all of them, so this only runs
+        // when one refuses the name.
+        const status = (error as PoeCharacterError).status;
+        if ((status !== 403 && status !== 404) || !publicClient.resolveAccountName) throw error;
+        const exact = await publicClient.resolveAccountName(account, realm);
+        if (exact === normalizeAccountName(account, realm)) throw error;
+        account = exact;
+        publicPassives = await publicClient.getPassives(account, found.name, realm);
+      }
+      const publicItems = await publicClient.getItems(account, found.name, realm);
+      fetched = { entry: found, passives: publicPassives, items: publicItems, source: 'public_profile' };
     }
-    let account = accountName;
-    let passives: Record<string, unknown>;
-    try {
-      passives = await client.getPassives(account, entry.name, realm);
-    } catch (error) {
-      // PoB reads the exact account spelling from the profile page because
-      // these endpoints used to be case-sensitive (ImportTab.lua). Checked
-      // 2026-11-15: a wrong-case name worked on all of them, so this only runs
-      // when one refuses the name.
-      const status = (error as PoeCharacterError).status;
-      if ((status !== 403 && status !== 404) || !client.resolveAccountName) throw error;
-      const exact = await client.resolveAccountName(account, realm);
-      if (exact === normalizeAccountName(account, realm)) throw error;
-      account = exact;
-      passives = await client.getPassives(account, entry.name, realm);
-    }
-    const items = await client.getItems(account, entry.name, realm);
+    const { entry, passives, items } = fetched;
+    const fromLogin = fetched.source === 'pob_login';
 
     await context.ensureLuaClient();
     const luaClient = context.getLuaClient();
@@ -302,6 +397,7 @@ export async function handleImportCharacter(context: LuaHandlerContext, args: Im
         items,
         mainSkill: args.mainSkill,
         ignoreWeaponSwap: args.ignoreWeaponSwap,
+        questChoicesFromResponse: fromLogin,
       });
     } catch (error) {
       // Do not leave a half-imported build in the bridge.
@@ -313,6 +409,9 @@ export async function handleImportCharacter(context: LuaHandlerContext, args: Im
 
     const lines: string[] = [
       `✅ Imported ${describeCharacter(entry)} from pathofexile.com with PoB's importer${baseBuild ? ` on top of "${buildFileName(baseBuild)}"` : ' into a new build'}.`,
+      fromLogin
+        ? 'Source: Path of Building (MCP)\'s Path of Exile login (official API, as PoB\'s "Import From Your Account").'
+        : chosen.note ?? 'Source: public profile (no login).',
       `Class: ${result.class}/${result.ascendancy} · level ${result.level} · ${result.allocatedNodes} passive nodes · ${result.socketGroups} socket groups`,
       `Main skill: ${result.mainSkill ?? 'none'} (${result.mainSkillSource}${result.mainSkillWanted && result.mainSkill?.toLowerCase() !== result.mainSkillWanted.toLowerCase() ? `; no group has ${result.mainSkillWanted}, pass main_skill to choose` : ''})`,
     ];
@@ -322,8 +421,14 @@ export async function handleImportCharacter(context: LuaHandlerContext, args: Im
 
     // dkjson encodes an empty Lua table as [], so only an object carries entries.
     const restored = result.restoredConfig && !Array.isArray(result.restoredConfig) ? Object.entries(result.restoredConfig) : [];
+    if (fromLogin && result.questChoices) {
+      const q = result.questChoices;
+      lines.push(`Bandit and pantheon from the account: bandit ${q.bandit ?? '?'}, major ${q.pantheonMajorGod ?? '?'}, minor ${q.pantheonMinorGod ?? '?'}.`);
+    }
     if (restored.length) {
-      lines.push('', "Kept from the base build (PoB's importer overwrites these: bandit and pantheon are not in the public API, the resistance penalty is re-estimated from passive points):");
+      lines.push('', fromLogin
+        ? "Kept from the base build (PoB's importer re-estimates the resistance penalty from passive points):"
+        : "Kept from the base build (PoB's importer overwrites these: bandit and pantheon are not in the public API, the resistance penalty is re-estimated from passive points):");
       for (const [key, value] of restored) lines.push(`  ${key}: kept ${String(value.kept)} (importer set ${String(value.imported)})`);
     }
 
@@ -359,7 +464,7 @@ export async function handleImportCharacter(context: LuaHandlerContext, args: Im
       lines.push('', 'Not saved (pass save_as or set POB_CHARACTER_BUILD). The import stays loaded in the bridge.');
     }
 
-    const characterLimit = client.rateLimits?.get('backend-character-request-limit');
+    const characterLimit = client?.rateLimits?.get('backend-character-request-limit');
     if (characterLimit) {
       const usage = characterLimit.rules.map((r) => `${r.current}/${r.limit.hits} per ${r.limit.periodSeconds}s`).join(', ');
       lines.push(`pathofexile.com character requests used: ${usage}.`);

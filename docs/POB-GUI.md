@@ -43,6 +43,27 @@ recent commands, and panels the MCP sends with `pob_show`.
   `compare_builds`, the optimisers) replace what is open in it.
 - `pob_show`: put text in the MCP tab (ASCII; PoB colour codes like `^2` work).
 
+## Importing through PoB's Path of Exile login
+
+`import_character` can fetch the character through the login the PoB window
+holds, the official API PoB's own "Import From Your Account" uses. Unlike the
+public profile, it carries bandit and pantheon, and the account's Characters
+tab need not be public.
+
+1. In the window, Import/Export, click "Authorize with Path of Exile" and
+   approve in the browser (once; PoB keeps the login in its settings, under
+   `PathOfBuilding-gui\src`, apart from the installed PoB).
+2. Call `import_character`. With `source: auto` (the default) it uses the
+   login whenever the window runs and is logged in, whichever engine runs the
+   tools, and the report names the source and, when it is not the login, why.
+   `source: pob_login` insists on the login; `public_profile` never uses it.
+
+The download runs inside PoB with its own client, token refresh and rate
+limiter; no token leaves PoB, only the character data. The login reaches only
+the logged-in account's characters, so with an explicit `account_name`,
+`auto` uses the public profile. In Dev Mode PoB itself writes each response to
+`PathOfBuilding-gui\src\poe_api_response.json`.
+
 Server env: `POB_GUI_PATH` (the desktop checkout), optional `POB_TARGET`
 (`headless` default, `gui`, `auto`), `POB_MCP_PORT` (49280),
 `POB_GUI_TIMEOUT_MS` (30000).

@@ -295,6 +295,14 @@ class PoBMCPServer {
             targetStatus: () => this.luaClientManager.targetStatus(),
             selectTarget: (target) => this.luaClientManager.selectTarget(target),
             showPanel: (title, text, focus) => this.luaClientManager.showPanel(title, text, focus),
+            pobLogin: {
+              status: () => this.luaClientManager.withGui((gui) => gui.poeApiStatus()),
+              character: async (name, realm) => {
+                const character = await this.luaClientManager.withGui((gui) => gui.poeApiCharacter(name, realm));
+                if (!character) throw new Error('The Path of Building desktop target is not configured: set POB_GUI_PATH.');
+                return character;
+              },
+            },
           } : undefined,
         };
 

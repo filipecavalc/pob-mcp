@@ -362,7 +362,7 @@ export interface CalcWithParams {
 export type ItemsTabAction =
   | "item_craft_bases" | "item_craft_create" | "item_craft_affixes" | "item_craft_properties"
   | "item_add_modifier" | "item_add_implicit" | "item_corrupt" | "item_enchant"
-  | "search_item_db" | "item_set_manage" | "list_shared_items";
+  | "search_item_db" | "item_set_manage" | "list_shared_items" | "items_tab_state" | "items_tab_show_item";
 
 export class PoBLuaApiClient {
   private loadedFilePath?: string;

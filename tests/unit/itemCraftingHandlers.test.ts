@@ -135,21 +135,26 @@ describe('craft_item_add_modifier and friends', () => {
       item_add_modifier: {
         sources: [{ label: 'Crafting Bench', id: 'MASTER' }, { label: 'Custom', id: 'CUSTOM' }],
         source: 'MASTER', sortBy: 'Life', matched: 3,
-        options: [{ index: 1, label: '+(41-45) to maximum Life/Regenerate 4 Mana per second (Prefix)', type: 'Prefix', affix: 'Upgraded', level: 81, sortValue: 5628 }],
+        options: [{ index: 1, label: '+(41-45) to maximum Life/Regenerate 4 Mana per second (Prefix)', type: 'Prefix', affix: 'Upgraded', level: 81, sortValue: 5628 },
+          { index: 2, id: 'IncreasedLifeEssence1', label: 'Deafening Essence of Greed', type: 'Prefix' }],
       },
     }, { addItem: async () => { throw new Error('must not equip a listing'); } });
     const text = textOf(await handleCraftItemAddModifier(context, { item_text: ITEM.text, source: 'MASTER', sort_by: 'Life', limit: 1, equip_slot: 'Helmet' }));
     expect(calls[0].params).toEqual({ text: ITEM.text, source: 'MASTER', sortBy: 'Life', limit: 1 });
     expect(text).toContain('Sources: Crafting Bench (MASTER), Custom (CUSTOM)');
     expect(text).toContain('1. +(41-45) to maximum Life/Regenerate 4 Mana per second (Prefix) ("Upgraded", L81, sort value 5,628)');
-    expect(text).toContain('... 2 more');
+    expect(text).toContain('2. Deafening Essence of Greed [IncreasedLifeEssence1] (Prefix)');
+    expect(text).toContain('a bare index is refused');
+    expect(text).toContain('... 1 more');
     expect(text).toContain('Nothing was crafted');
   });
 
   it('maps implicit group and modifier', async () => {
-    const { calls, context } = fakeClient({ item_add_implicit: { item: ITEM, source: 'EATER' } });
-    await handleCraftItemAddImplicit(context, { item_text: ITEM.text, source: 'EATER', group: '1', modifier: '3' });
-    expect(calls[0].params).toEqual({ text: ITEM.text, source: 'EATER', group: '1', modifier: '3' });
+    const { calls, context } = fakeClient({ item_add_implicit: { item: ITEM, source: 'EATER', group: '#% increased Attack Damage',
+      addedLabel: '15% increased Attack Damage', addedId: 'EaterAttackDamage1' } });
+    const text = textOf(await handleCraftItemAddImplicit(context, { item_text: ITEM.text, source: 'EATER', group: '1:#% increased Attack Damage', modifier: 'EaterAttackDamage1' }));
+    expect(calls[0].params).toEqual({ text: ITEM.text, source: 'EATER', group: '1:#% increased Attack Damage', modifier: 'EaterAttackDamage1' });
+    expect(text).toContain('Chosen: #% increased Attack Damage → 15% increased Attack Damage [EaterAttackDamage1]');
   });
 
   it('shows the implicit types when no group is given', async () => {
@@ -166,22 +171,24 @@ describe('craft_item_add_modifier and friends', () => {
       rollLines: [{ index: 1, line: '+1000 to maximum Life' }] } });
     const text = textOf(await handleCraftItemCorrupt(context, { item_text: ITEM.text, list: true, search: 'life' }));
     expect(calls[0].params).toEqual({ text: ITEM.text, list: true, search: 'life' });
-    expect(text).toContain('Implicit #1 (implicit) — implicits[0]:');
+    expect(text).toContain('Implicit #1 (implicit) — implicits[0]');
     expect(text).toContain('6. (4-6)% increased maximum Life (Corrupted, L1)');
     expect(text).toContain('1. +1000 to maximum Life');
   });
 
   it('maps enchant arguments', async () => {
     const { calls, context } = fakeClient({ item_enchant: { item: ITEM, slot: 1 } });
-    await handleCraftItemEnchant(context, { item_text: ITEM.text, skill: 'Righteous Fire', all_skills: true, enchantment: '1' });
-    expect(calls[0].params).toEqual({ text: ITEM.text, skill: 'Righteous Fire', allSkills: true, enchantment: '1' });
+    await handleCraftItemEnchant(context, { item_text: ITEM.text, skill: 'Righteous Fire', all_skills: true, enchantment: '1:40% increased Righteous Fire Damage' });
+    expect(calls[0].params).toEqual({ text: ITEM.text, skill: 'Righteous Fire', allSkills: true, enchantment: '1:40% increased Righteous Fire Damage' });
   });
 
   it('maps property changes and lists what can be set', async () => {
     const { calls, context } = fakeClient({ item_craft_properties: { item: ITEM, influenceOptions: ['Influence', 'Shaper', 'Elder'],
+      applied: { influences: ['Shaper'], removed: ['+20 to Strength'] },
       rangeLines: [{ index: 1, line: '+(15-25) to maximum Life', roll: 0.5 }], removableModifiers: [{ index: 1, line: '+20 to Strength', kind: 'crafted' }] } });
-    const text = textOf(await handleCraftItemProperties(context, { item_text: ITEM.text, influences: ['Shaper'], catalyst_quality: 20, remove_modifiers: [1] }));
-    expect(calls[0].params).toEqual({ text: ITEM.text, influences: ['Shaper'], catalystQuality: 20, removeModifiers: [1] });
+    const text = textOf(await handleCraftItemProperties(context, { item_text: ITEM.text, influences: ['Shaper'], catalyst_quality: 20, remove_modifiers: ['1:+20 to Strength'] }));
+    expect(calls[0].params).toEqual({ text: ITEM.text, influences: ['Shaper'], catalystQuality: 20, removeModifiers: ['1:+20 to Strength'] });
+    expect(text).toContain('Chosen: influences: Shaper; removed: +20 to Strength');
     expect(text).toContain('Influences PoB offers: Shaper, Elder');
     expect(text).toContain('1. +(15-25) to maximum Life (roll 0.5)');
     expect(text).toContain('1. +20 to Strength (crafted)');
@@ -241,5 +248,20 @@ describe('item databases, item sets and shared items', () => {
   it('fails clearly without a Lua bridge', async () => {
     const context = { ensureLuaClient: async () => {}, getLuaClient: () => null } as unknown as ItemCraftingContext;
     await expect(handleCraftItemBases(context, {})).rejects.toThrow(/Lua bridge not active/);
+  });
+});
+
+describe('chosen option echo', () => {
+  it('names the corruption implicits PoB applied', async () => {
+    const { context } = fakeClient({ item_corrupt: { item: { ...ITEM, corrupted: true }, source: 'Corrupted',
+      chosen: ['(4-6)% increased maximum Life', 'Regenerate (1.6-2)% of Life per second'] } });
+    const text = textOf(await handleCraftItemCorrupt(context, { item_text: ITEM.text, implicits: ['increased maximum Life', 'V2LifeRegenCorrupted'] }));
+    expect(text).toContain('Chosen: (4-6)% increased maximum Life; Regenerate (1.6-2)% of Life per second');
+  });
+
+  it('passes a stale index:label pair through so PoB can refuse it', async () => {
+    const { context } = fakeClient({ item_add_modifier: new Error('modifier 2 is "+(26-40) to maximum Life (Prefix)" now, not "+(15-25) to maximum Life (Prefix)"; list the options again') });
+    await expect(handleCraftItemAddModifier(context, { item_text: ITEM.text, source: 'MASTER', modifier: '2:+(15-25) to maximum Life (Prefix)' }))
+      .rejects.toThrow(/list the options again/);
   });
 });

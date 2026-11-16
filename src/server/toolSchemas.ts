@@ -1088,9 +1088,9 @@ const CRAFT_FOLLOW_UP_PROPERTIES = {
 const CRAFT_LIST_PROPERTIES = {
   sort_by: {
     type: "string",
-    description: "Sort the list as the popup's 'Sort by' does: PoB calculates each option on this build. A stat key or label from PoB's power list, e.g. FullDPS, CombinedDPS, Life, EnergyShield, TotalEHP, Armour.",
+    description: "Sort the list as the popup's 'Sort by' does: PoB calculates each option on this build. A stat key or label from PoB's power list, e.g. FullDPS, CombinedDPS, Life, EnergyShield, TotalEHP, Armour. Without it PoB's Default order is used, whatever the window's own sort is.",
   },
-  search: { type: "string", description: "Only list options whose label or lines contain this text. (Selections such as modifier take an option's index or text; text must match one option's label exactly or be part of only one, otherwise the error lists the candidates with their indexes.)" },
+  search: { type: "string", description: "Only list options whose label or lines contain this text." },
   limit: { type: "number", description: "Maximum options to list (default 50, max 500)." },
 };
 
@@ -1142,7 +1142,7 @@ function itemsTabToolSchemas(): ToolSchema[] {
               properties: {
                 type: { type: "string", enum: ["prefix", "suffix"] },
                 index: { type: "number", description: "Slot number (1-based); default the first empty slot of that type." },
-                modifier: { type: "string", description: "The option: its index from list, text from its label (e.g. 'maximum Life'), or a mod id from the tiers (picks that tier)." },
+                modifier: { type: "string", description: "The option: the option's label text (exact, or part of only one label), its id, or \"index:label\" exactly as listed; a bare index is refused because PoB rebuilds and re-sorts its lists. A tier's mod id from the listing picks that tier." },
                 tier: { type: "number", description: "Tier, 1 = best (default 1 when roll is given)." },
                 roll: { type: "number", description: "Roll within the tier, 0-1. Without tier and roll PoB's default slider position is used (the middle of the whole range)." },
                 clear: { type: "boolean", description: "Empty the slot." },
@@ -1177,13 +1177,13 @@ function itemsTabToolSchemas(): ToolSchema[] {
             items: {
               type: "object",
               properties: {
-                line: { type: "string", description: "Line index from the listing or text of the line." },
+                line: { type: "string", description: "The line: the option's label text (exact, or part of only one label), its id, or \"index:label\" exactly as listed; a bare index is refused because PoB rebuilds and re-sorts its lists." },
                 roll: { type: "number", description: "0-1." },
               },
               required: ["line", "roll"],
             },
           },
-          remove_modifiers: { type: "array", items: { type: "string" }, description: "Crafted or custom modifiers to remove (index from the listing or text)." },
+          remove_modifiers: { type: "array", items: { type: "string" }, description: "Crafted or custom modifiers to remove: the option's label text (exact, or part of only one label), its id, or \"index:label\" exactly as listed; a bare index is refused because PoB rebuilds and re-sorts its lists." },
           ...CRAFT_FOLLOW_UP_PROPERTIES,
         },
         required: ["item_text"],
@@ -1191,13 +1191,13 @@ function itemsTabToolSchemas(): ToolSchema[] {
     },
     {
       name: "craft_item_add_modifier",
-      description: "Path of Building's 'Add modifier...' popup on a magic or rare item: sources Crafting Bench (MASTER), Essence, Veiled, Beastcraft, Necropolis (armour), Delve, Prefix/Suffix (any rollable affix, for items not crafted in PoB) and Custom, each with PoB's own list for this item. Without modifier, lists the source's options (optionally sorted by PoB's calculation on this build); with modifier, adds it and returns the item text.",
+      description: "Path of Building's 'Add modifier...' popup on a magic or rare item: sources Crafting Bench (MASTER), Essence, Veiled, Beastcraft, Necropolis (armour), Delve, Prefix/Suffix (any rollable affix, for items not crafted in PoB) and Custom, each with PoB's own list for this item. In this PoB version the Prefix/Suffix sources fail inside PoB for some items (affixes without a type); the error then says PoB's popup failed. Without modifier, lists the source's options (optionally sorted by PoB's calculation on this build); with modifier, adds it and returns the item text.",
       inputSchema: {
         type: "object",
         properties: {
           item_text: ITEM_TEXT_PROPERTY,
           source: { type: "string", description: "Source id or label: MASTER, ESSENCE, VEILED, BEASTCRAFT, NECROPOLIS, DELVE, PREFIX, SUFFIX, CUSTOM (default: the popup's first source)." },
-          modifier: { type: "string", description: "Option index from the listing, or text of its label." },
+          modifier: { type: "string", description: "The option: the option's label text (exact, or part of only one label), its id, or \"index:label\" exactly as listed; a bare index is refused because PoB rebuilds and re-sorts its lists." },
           custom: { type: "string", description: "With source CUSTOM: the modifier line to add." },
           ...CRAFT_LIST_PROPERTIES,
           ...CRAFT_FOLLOW_UP_PROPERTIES,
@@ -1213,8 +1213,8 @@ function itemsTabToolSchemas(): ToolSchema[] {
         properties: {
           item_text: ITEM_TEXT_PROPERTY,
           source: { type: "string", description: "EXARCH, EATER, DELVE or CUSTOM (default: the popup's first source)." },
-          group: { type: "string", description: "Implicit type: index from the listing or text." },
-          modifier: { type: "string", description: "Modifier within the type: index or text." },
+          group: { type: "string", description: "Implicit type: the option's label text (exact, or part of only one label), its id, or \"index:label\" exactly as listed; a bare index is refused because PoB rebuilds and re-sorts its lists." },
+          modifier: { type: "string", description: "Modifier within the type, same forms." },
           custom: { type: "string", description: "With source CUSTOM: the implicit line to add." },
           ...CRAFT_LIST_PROPERTIES,
           ...CRAFT_FOLLOW_UP_PROPERTIES,
@@ -1230,14 +1230,14 @@ function itemsTabToolSchemas(): ToolSchema[] {
         properties: {
           item_text: ITEM_TEXT_PROPERTY,
           source: { type: "string", enum: ["Corrupted", "Scourge"], description: "Default Corrupted." },
-          implicits: { type: "array", items: { type: "string" }, description: "One entry per implicit dropdown in order (index or text; 'None' skips one)." },
+          implicits: { type: "array", items: { type: "string" }, description: "One entry per implicit dropdown in order ('None' skips one): the option's label text (exact, or part of only one label), its id, or \"index:label\" exactly as listed; a bare index is refused because PoB rebuilds and re-sorts its lists. Each pick removes its group from the paired dropdown, as in PoB." },
           rolls: {
             type: "array",
             description: "Unique and relic items: corrupted roll per line.",
             items: {
               type: "object",
               properties: {
-                line: { type: "string", description: "Line index from the listing or text." },
+                line: { type: "string", description: "The line, same forms as implicits." },
                 value: { type: "number", description: "0.78-1.22." },
               },
               required: ["line", "value"],
@@ -1261,7 +1261,7 @@ function itemsTabToolSchemas(): ToolSchema[] {
           skill: { type: "string", description: "Helmet enchants: the skill." },
           all_skills: { type: "boolean", description: "Helmet enchants: list every skill, not only the build's." },
           source: { type: "string", description: "Enchantment source label or id." },
-          enchantment: { type: "string", description: "Option index from the listing, or text." },
+          enchantment: { type: "string", description: "The enchantment: the option's label text (exact, or part of only one label), its id, or \"index:label\" exactly as listed; a bare index is refused because PoB rebuilds and re-sorts its lists." },
           remove: { type: "boolean", description: "Remove the enchantment in this slot." },
           ...CRAFT_LIST_PROPERTIES,
           ...CRAFT_FOLLOW_UP_PROPERTIES,

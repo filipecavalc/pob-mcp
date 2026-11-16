@@ -1914,17 +1914,25 @@ end
 -- Runs fn(tab) with `item` as the Items tab's display item (ItemsTab:SetDisplayItem,
 -- as double-clicking an item does), then closes any popup the call left open and
 -- puts the previous display item back, as evaluate_anoint_candidates does.
-local function withDisplayItem(item, fn)
+-- hooks.prepare(tab) runs before the item is shown; hooks.restore(tab) runs
+-- before the previous item is shown again, so tab state that shapes its
+-- controls (the affix sort) is the user's again by then.
+local function withDisplayItem(item, fn, hooks)
   local tab, err = itemsTabReady()
   if not tab then return nil, err end
-  local previous = tab.displayItem
+  hooks = hooks or {}
+  local previous, previousSnap = tab.displayItem, tab.snapHScroll
   local popupsBefore = #main.popups
   local ok, res, ferr = pcall(function()
+    if hooks.prepare then hooks.prepare(tab) end
     tab:SetDisplayItem(item)
     return fn(tab)
   end)
   while #main.popups > popupsBefore do main:ClosePopup() end
+  if hooks.restore then pcall(hooks.restore, tab) end
   if not pcall(tab.SetDisplayItem, tab, previous) then tab.displayItem = previous end
+  -- SetDisplayItem also scrolls the tab towards the item it shows.
+  tab.snapHScroll = previousSnap
   if not ok then return nil, cleanError(res) end
   return res, ferr
 end
@@ -1944,17 +1952,29 @@ local function entryLabel(entry)
   return entry
 end
 
--- Finds `want` in a dropdown list: a 1-based index, or text compared with each
--- entry's label without colour codes, exactly (ignoring case) and then as a
--- unique substring. extraMatch(entry, want) can accept an entry by other keys.
+-- Finds `want` in a dropdown list. PoB rebuilds these lists on every earlier
+-- pick (another slot's selection, a source change) and sort_by reorders them,
+-- so a bare index could name a different option than the one listed. Accepted:
+-- an id extraMatch(entry, want) recognises (a mod id), "index:label" exactly as
+-- a listing printed it (checked against the list as it is now), or text
+-- compared with each label without colour codes, exactly (ignoring case) and
+-- then as a unique substring.
 local function pickFromList(list, want, what, extraMatch)
   if want == nil then return nil, what .. ' is required' end
-  local n = tonumber(want)
-  if type(want) == 'number' or (n and tostring(want):match('^%s*%d+%s*$')) then
-    if list[n] then return n end
-    return nil, string.format('%s index %s out of range (1-%d)', what, tostring(want), #list)
+  local text = tostring(want)
+  if type(want) == 'number' or text:match('^%s*%d+%s*$') then
+    return nil, string.format('%s "%s": a bare index is not accepted, because PoB rebuilds and re-sorts its lists; pass the text, the id, or "index:label" as listed', what, text)
   end
-  local needle = tostring(want):lower()
+  local pairIndex, pairLabel = text:match('^%s*(%d+)%s*:%s*(.-)%s*$')
+  if pairIndex then
+    local index = tonumber(pairIndex)
+    local entry = list[index]
+    local actual = entry ~= nil and tostring(cleanText(entryLabel(entry)) or '') or nil
+    if actual and actual:lower() == pairLabel:lower() then return index end
+    return nil, string.format('%s %d is %s now, not "%s"; list the options again', what, index,
+      actual and ('"' .. actual .. '"') or 'not in the list', pairLabel)
+  end
+  local needle = text:lower()
   local matches = {}
   for i, entry in ipairs(list) do
     if extraMatch and extraMatch(entry, want) then return i end
@@ -1968,7 +1988,7 @@ local function pickFromList(list, want, what, extraMatch)
   for k = 1, math.min(#matches, 10) do
     names[k] = string.format('%d: %s', matches[k], tostring(cleanText(entryLabel(list[matches[k]]))))
   end
-  return nil, string.format('%d %s entries match "%s"; pass a more specific text or the index (%s%s)', #matches, what,
+  return nil, string.format('%d %s entries match "%s"; pass a more specific text or "index:label" (%s%s)', #matches, what,
     tostring(want), table.concat(names, ' | '), #matches > 10 and ' | ...' or '')
 end
 
@@ -1984,20 +2004,33 @@ local function labelsOf(list)
   return out
 end
 
--- The popups' "Sort by" dropdowns hold data.powerStatList entries; match a stat
--- key (FullDPS, Life) or a label (Full DPS).
-local function selectSort(control, sortBy)
-  if sortBy == nil or sortBy == '' then return true end
+-- The "Sort by" dropdowns hold data.powerStatList entries after "Default" (no
+-- stat); match a stat key (FullDPS, Life) or a label (Full DPS). Without sortBy
+-- the answer is "Default", so a sort the user picked never shapes a listing.
+local function findSort(control, sortBy)
+  if sortBy == nil or sortBy == '' then
+    for i, entry in ipairs(control.list) do
+      if type(entry) == 'table' and entry.stat == nil and entry.label == 'Default' then return i, entry end
+    end
+    return 1, control.list[1]
+  end
   local want = tostring(sortBy):lower()
   for i, entry in ipairs(control.list) do
     if (entry.stat and entry.stat:lower() == want) or (entry.label and entry.label:lower() == want) then
-      selectEntry(control, i)
-      return entry
+      return i, entry
     end
   end
   local names = {}
   for _, entry in ipairs(control.list) do if entry.stat then table.insert(names, entry.stat) end end
   return nil, 'unknown sort_by "' .. tostring(sortBy) .. '"; use one of: ' .. table.concat(names, ', ')
+end
+
+-- Selects the sort in a popup as a click does; returns the entry.
+local function selectSort(control, sortBy)
+  local index, entry = findSort(control, sortBy)
+  if not index then return nil, entry end
+  if index ~= control.selIndex then selectEntry(control, index) end
+  return entry
 end
 
 local function optionLimit(params)
@@ -2020,6 +2053,8 @@ local function listOptions(list, params, describe)
       if #options < limit then
         option.index = i
         option.label = label
+        -- What pickFromList accepts for this option, checked when it is used.
+        option.pick = string.format('%d:%s', i, tostring(label or ''))
         table.insert(options, option)
       end
     end
@@ -2031,6 +2066,32 @@ local function sourcesOf(list)
   local out = {}
   for i, s in ipairs(list) do out[i] = { label = s.label, id = s.sourceId } end
   return out
+end
+
+-- Ids of PoB's mod tables (the item's affix pool, veiled, necropolis and
+-- beastcraft mods), so a listing can name an option by a key that does not
+-- move when a list is rebuilt. Bench crafts are a plain list without ids.
+local function modIdLookup(item)
+  local ids
+  return function(mod)
+    if type(mod) ~= 'table' then return nil end
+    if not ids then
+      ids = {}
+      for _, pool in ipairs({ item.affixes or {}, data.veiledMods or {}, data.necropolisMods or {}, data.beastCraft or {} }) do
+        for id, candidate in pairs(pool) do
+          if type(id) == 'string' and type(candidate) == 'table' and not ids[candidate] then ids[candidate] = id end
+        end
+      end
+    end
+    return ids[mod]
+  end
+end
+
+-- extraMatch for pickFromList: an entry whose `mod` has the wanted id.
+local function matchModId(idOf)
+  return function(entry, want)
+    return type(entry) == 'table' and entry.mod ~= nil and idOf(entry.mod) == want
+  end
 end
 
 -- params: { type?: string, search?: string, limit?: number }
@@ -2082,8 +2143,11 @@ function M.item_craft_create(params)
   params = type(params) == 'table' and params or {}
   local tab, err = itemsTabReady()
   if not tab then return nil, err end
-  local rarityIndex
+  -- RARE unless told otherwise, as the schema says; CraftItem would otherwise
+  -- start from the rarity the user last picked (lastCraftRaritySel).
+  local rarityIndex = 3
   if params.rarity ~= nil then
+    rarityIndex = nil
     for i, rarity in ipairs(CRAFT_RARITIES) do
       if rarity == tostring(params.rarity):upper() then rarityIndex = i end
     end
@@ -2095,7 +2159,7 @@ function M.item_craft_create(params)
     end
     return withDisplayItem(nil, function()
       local controls = openTabPopup(tab, 'EditDisplayItemText')
-      if rarityIndex then controls.rarity.selIndex = rarityIndex end
+      controls.rarity.selIndex = rarityIndex
       controls.edit:SetText((params.text:gsub('\r\n', '\n')))
       if not controls.save:IsEnabled() then
         error('PoB cannot read this item text: for rare and unique items the first two lines must be the name and the base type; for normal and magic items the base type must be in the first line')
@@ -2119,7 +2183,7 @@ function M.item_craft_create(params)
   local remembered = { tab.lastCraftRaritySel, tab.lastCraftTypeSel, tab.lastCraftBaseSel }
   local res, ferr = withDisplayItem(nil, function()
     local controls = openTabPopup(tab, 'CraftItem')
-    if rarityIndex then controls.rarity.selIndex = rarityIndex end
+    controls.rarity.selIndex = rarityIndex
     if params.title ~= nil then controls.title:SetText(tostring(params.title)) end
     local typeIndex = isValueInArray(controls.type.list, typeName)
     if not typeIndex then error('PoB lists no base type "' .. typeName .. '"') end
@@ -2196,13 +2260,19 @@ function M.item_craft_affixes(params)
     return nil, 'only items crafted in PoB (craft_item_create with a base, as magic or rare) have prefix and suffix dropdowns; use craft_item_add_modifier for other items'
   end
   local tab = build.itemsTab
+  -- The "Modifier sorting" dropdown is the tab's own and persists: set this
+  -- call's sort (Default unless sortBy) before the item is shown, so the user's
+  -- choice never reorders what an option index means, and give it back before
+  -- the user's display item is shown again.
   local sortControl = tab.controls.craftingSorting
-  local previousSort = sortControl and sortControl.selIndex
-  local res, ferr = withDisplayItem(item, function()
-    if params.sortBy ~= nil then
-      local ok, serr = selectSort(sortControl, params.sortBy)
-      if not ok then error(serr) end
-    end
+  local sortIndex, sortErr = findSort(sortControl, params.sortBy)
+  if not sortIndex then return nil, sortErr end
+  local previousSort = sortControl.selIndex
+  local hooks = {
+    prepare = function() sortControl.selIndex = sortIndex end,
+    restore = function() sortControl.selIndex = previousSort end,
+  }
+  return withDisplayItem(item, function()
     local applied = {}
     for n, change in ipairs(type(params.changes) == 'table' and params.changes or {}) do
       local current = tab.displayItem
@@ -2211,7 +2281,7 @@ function M.item_craft_affixes(params)
       local kind = isPrefix and 'prefix' or 'suffix'
       if change.clear then
         selectEntry(control, 1)
-        table.insert(applied, { type = kind, index = index, modId = 'None' })
+        table.insert(applied, { type = kind, index = index, modId = 'None', label = 'None' })
       else
         local wantedModId
         local groupIndex, gerr = pickFromList(control.list, change.modifier, 'modifier', function(entry, want)
@@ -2225,7 +2295,7 @@ function M.item_craft_affixes(params)
         local entry = control.list[groupIndex]
         if type(entry) ~= 'table' or not entry.modList then
           selectEntry(control, 1)
-          table.insert(applied, { type = kind, index = index, modId = 'None' })
+          table.insert(applied, { type = kind, index = index, modId = 'None', label = 'None' })
         else
           local count = #entry.modList
           if change.tier ~= nil or change.roll ~= nil or wantedModId then
@@ -2248,7 +2318,7 @@ function M.item_craft_affixes(params)
           local affix = current[control.outputTable][control.outputIndex]
           local mod = affix and current.affixes[affix.modId]
           local k = affix and isValueInArray(entry.modList, affix.modId)
-          table.insert(applied, { type = kind, index = index, modId = affix and affix.modId, affix = mod and mod.affix,
+          table.insert(applied, { type = kind, index = index, label = cleanText(entry.label), modId = affix and affix.modId, affix = mod and mod.affix,
             lines = mod and copyLines(mod), range = affix and affix.range, tier = k and (count - k + 1) or nil })
         end
       end
@@ -2261,13 +2331,11 @@ function M.item_craft_affixes(params)
       result.options = options
       result.matched = matched
       result.listed = { type = isPrefix and 'prefix' or 'suffix', index = index, selected = control.selIndex }
-      local sortEntry = sortControl and sortControl.list[sortControl.selIndex]
+      local sortEntry = sortControl.list[sortControl.selIndex]
       result.sortBy = sortEntry and sortEntry.stat and sortEntry.label or nil
     end
     return result
-  end)
-  if sortControl and previousSort then sortControl.selIndex = previousSort end
-  return res, ferr
+  end, hooks)
 end
 
 -- The "Remove" buttons ItemsTab:UpdateCustomControls made for the display item.
@@ -2309,14 +2377,15 @@ function M.item_craft_properties(params)
       if type(params.influences) ~= 'table' or #params.influences > 2 then error('influences must be a list of up to two names') end
       if not c.displayItemInfluence:GetProperty('shown') then error('PoB offers no influence for this item') end
       local picks = { 1, 1 }
+      applied.influences = {}
       for k, name in ipairs(params.influences) do
         local index, ierr = pickFromList(c.displayItemInfluence.list, name, 'influence')
         if not index or index == 1 then error(ierr or 'name an influence, not the placeholder') end
         picks[k] = index
+        applied.influences[k] = cleanText(c.displayItemInfluence.list[index])
       end
       c.displayItemInfluence2.selIndex = picks[2]
       selectEntry(c.displayItemInfluence, picks[1])
-      applied.influences = params.influences
     end
     if params.quality ~= nil then
       if not c.displayItemQualityEdit:GetProperty('shown') then error('this item has no quality in PoB') end
@@ -2342,6 +2411,7 @@ function M.item_craft_properties(params)
       if params.clusterSkill ~= nil then
         local index, kerr = pickFromList(c.displayItemClusterJewelSkill.list, params.clusterSkill, 'cluster jewel skill')
         if not index then error(kerr) end
+        applied.clusterSkill = cleanText(c.displayItemClusterJewelSkill.list[index].label)
         selectEntry(c.displayItemClusterJewelSkill, index)
       end
       if params.clusterNodeCount ~= nil then
@@ -2359,9 +2429,11 @@ function M.item_craft_properties(params)
       local lineControl = c.displayItemRangeLine
       local index, rerr = pickFromList(lineControl.list, change.line, 'range line')
       if not index then error(string.format('ranges %d: %s', n, rerr)) end
-      selectEntry(lineControl, index)
       local roll = tonumber(change.roll)
       if not roll or roll < 0 or roll > 1 then error(string.format('ranges %d: roll must be 0-1', n)) end
+      applied.ranges = applied.ranges or {}
+      table.insert(applied.ranges, { line = cleanText(lineControl.list[index].label), roll = roll })
+      selectEntry(lineControl, index)
       -- SetVal runs the slider's handler only on a change.
       c.displayItemRangeSlider.val = -1
       c.displayItemRangeSlider:SetVal(roll)
@@ -2370,15 +2442,18 @@ function M.item_craft_properties(params)
       local buttons = removableModifiers(c, tab.displayItem)
       local index, merr = pickFromList(buttons, want, 'removable modifier')
       if not index then error(string.format('removeModifiers %d: %s', n, merr)) end
+      applied.removed = applied.removed or {}
+      table.insert(applied.removed, buttons[index].label)
       buttons[index].button.onClick()
     end
     local current = tab.displayItem
     local rangeLines, removable = {}, {}
     for i, entry in ipairs(c.displayItemRangeLine.list or {}) do
-      table.insert(rangeLines, { index = i, line = cleanText(entry.label), roll = entry.modLine and entry.modLine.range })
+      table.insert(rangeLines, { index = i, line = cleanText(entry.label), pick = i .. ':' .. tostring(cleanText(entry.label)),
+        roll = entry.modLine and entry.modLine.range })
     end
     for i, entry in ipairs(removableModifiers(c, current)) do
-      table.insert(removable, { index = i, line = entry.label, kind = entry.kind })
+      table.insert(removable, { index = i, line = entry.label, pick = i .. ':' .. entry.label, kind = entry.kind })
     end
     return {
       item = describeItem(current), applied = applied,
@@ -2393,11 +2468,14 @@ function M.item_craft_properties(params)
   end)
 end
 
-local function describeListMod(listMod)
-  local option = describeMod(listMod.mod) or {}
-  option.sortValue = listMod.sortValue
-  if listMod.essence then option.essence = listMod.essence.name end
-  return option
+local function describeListModWith(idOf)
+  return function(listMod)
+    local option = describeMod(listMod.mod) or {}
+    option.id = idOf(listMod.mod)
+    option.sortValue = listMod.sortValue
+    if listMod.essence then option.essence = listMod.essence.name end
+    return option
+  end
 end
 
 -- params: { text, source?, modifier?, custom?, sortBy?, search?, limit? }
@@ -2410,21 +2488,31 @@ function M.item_add_modifier(params)
     if not tab.controls.displayItemAddCustom:GetProperty('shown') then
       error('PoB offers "Add modifier..." only for magic and rare items (and rare-like uniques); this item is ' .. tostring(item.rarity))
     end
-    local controls = openTabPopup(tab, 'AddCustomModifierToDisplayItem')
+    -- PoB 2.67.2's Prefix/Suffix sources call mod.type:lower() on every affix of
+    -- the item, and some pools hold affixes without a type, so building that list
+    -- raises inside PoB (ItemsTab.lua, AddCustomModifierToDisplayItem buildMods).
+    -- Report that as PoB's failure rather than as a bad argument.
+    local function inPopup(fn, ...)
+      local ok, res = pcall(fn, ...)
+      if not ok then error("PoB's Add modifier popup fails for this item: " .. cleanError(res), 0) end
+      return res
+    end
+    local controls = inPopup(openTabPopup, tab, 'AddCustomModifierToDisplayItem')
     local sources = controls.source.list
     if params.source ~= nil then
       local index, serr = pickFromList(sources, params.source, 'source', function(entry, want)
         return entry.sourceId and entry.sourceId:lower() == tostring(want):lower()
       end)
       if not index then error(serr) end
-      if index ~= controls.source.selIndex then selectEntry(controls.source, index) end
+      if index ~= controls.source.selIndex then inPopup(selectEntry, controls.source, index) end
     end
+    local idOf = modIdLookup(tab.displayItem)
     local source = sources[controls.source.selIndex]
     local sort
-    if params.sortBy ~= nil and source.sourceId ~= 'CUSTOM' then
+    if source.sourceId ~= 'CUSTOM' then
       local ok, serr = selectSort(controls.sort, params.sortBy)
       if not ok then error(serr) end
-      sort = ok.label
+      sort = ok.stat and ok.label or nil
     end
     if source.sourceId == 'CUSTOM' then
       if type(params.custom) ~= 'string' or not params.custom:match('%S') then
@@ -2435,16 +2523,16 @@ function M.item_add_modifier(params)
       return { item = describeItem(tab.displayItem), source = source.sourceId, added = { lines = { params.custom } } }
     end
     if params.modifier == nil then
-      local options, matched = listOptions(controls.modSelect.list, params, describeListMod)
+      local options, matched = listOptions(controls.modSelect.list, params, describeListModWith(idOf))
       return { sources = sourcesOf(sources), source = source.sourceId, sortBy = sort, options = options, matched = matched }
     end
-    local index, merr = pickFromList(controls.modSelect.list, params.modifier, 'modifier')
+    local index, merr = pickFromList(controls.modSelect.list, params.modifier, 'modifier', matchModId(idOf))
     if not index then error(merr) end
     controls.modSelect.selIndex = index
     local listMod = controls.modSelect.list[index]
     controls.save.onClick()
     return { item = describeItem(tab.displayItem), source = source.sourceId,
-      added = describeMod(listMod.mod), addedLabel = cleanText(listMod.label) }
+      added = describeMod(listMod.mod), addedId = idOf(listMod.mod), addedLabel = cleanText(listMod.label) }
   end)
 end
 
@@ -2472,10 +2560,10 @@ function M.item_add_implicit(params)
     end
     local source = sources[controls.source.selIndex]
     local sort
-    if params.sortBy ~= nil and source.sourceId ~= 'CUSTOM' then
+    if source.sourceId ~= 'CUSTOM' then
       local ok, serr = selectSort(controls.sort, params.sortBy)
       if not ok then error(serr) end
-      sort = ok.label
+      sort = ok.stat and ok.label or nil
     end
     if source.sourceId == 'CUSTOM' then
       if type(params.custom) ~= 'string' or not params.custom:match('%S') then
@@ -2486,6 +2574,7 @@ function M.item_add_implicit(params)
       return { item = describeItem(tab.displayItem), source = source.sourceId, added = { lines = { params.custom } } }
     end
     local groups = controls.modGroupSelect.list
+    local idOf = modIdLookup(tab.displayItem)
     if params.group == nil then
       -- The Type dropdown; each type's Modifier dropdown is listed with group.
       local options, matched = listOptions(groups, params, function(group, i)
@@ -2498,17 +2587,17 @@ function M.item_add_implicit(params)
     if not groupIndex then error(gerr) end
     selectEntry(controls.modGroupSelect, groupIndex)
     if params.modifier == nil then
-      local options, matched = listOptions(controls.modSelect.list, params, describeListMod)
+      local options, matched = listOptions(controls.modSelect.list, params, describeListModWith(idOf))
       return { sources = sourcesOf(sources), source = source.sourceId, sortBy = sort,
         group = cleanText(groups[groupIndex].label), options = options, matched = matched }
     end
-    local index, merr = pickFromList(controls.modSelect.list, params.modifier, 'modifier')
+    local index, merr = pickFromList(controls.modSelect.list, params.modifier, 'modifier', matchModId(idOf))
     if not index then error(merr) end
     controls.modSelect.selIndex = index
     local listMod = controls.modSelect.list[index]
     controls.save.onClick()
-    return { item = describeItem(tab.displayItem), source = source.sourceId,
-      added = describeMod(listMod.mod), addedLabel = cleanText(listMod.label) }
+    return { item = describeItem(tab.displayItem), source = source.sourceId, group = cleanText(groups[groupIndex].label),
+      added = describeMod(listMod.mod), addedId = idOf(listMod.mod), addedLabel = cleanText(listMod.label) }
   end)
 end
 
@@ -2533,10 +2622,10 @@ function M.item_corrupt(params)
     end
     local sourceName = controls.source.list[controls.source.selIndex]
     local sort
-    if params.sortBy ~= nil then
+    do
       local ok, serr = selectSort(controls.sort, params.sortBy)
       if not ok then error(serr) end
-      sort = ok.label
+      sort = ok.stat and ok.label or nil
     end
     local slots = {}
     for i = 1, 4 do
@@ -2548,19 +2637,24 @@ function M.item_corrupt(params)
         table.insert(rollLines, { index = i, label = cleanText(controls['rollRangeLabel' .. i].label) })
       end
     end
+    local idOf = modIdLookup(tab.displayItem)
+    local chosen = {}
     local wantsRolls = type(params.rolls) == 'table' and #params.rolls > 0
     local wantsImplicits = type(params.implicits) == 'table' and #params.implicits > 0
     if params.list then
       local lists = {}
       for _, i in ipairs(slots) do
         local options, matched = listOptions(controls['implicit' .. i].list, params, function(entry)
-          return entry.mod and describeMod(entry.mod) or { none = true }
+          if not entry.mod then return { none = true } end
+          local option = describeMod(entry.mod)
+          option.id = idOf(entry.mod)
+          return option
         end)
         table.insert(lists, { slot = i, kind = sourceName == 'Scourge' and (i <= 2 and 'upside' or 'downside') or 'implicit',
           options = options, matched = matched })
       end
       local rolls = {}
-      for k, line in ipairs(rollLines) do rolls[k] = { index = k, line = line.label } end
+      for k, line in ipairs(rollLines) do rolls[k] = { index = k, line = line.label, pick = k .. ':' .. tostring(line.label) } end
       return { sources = labelsOf(controls.source.list), source = sourceName, sortBy = sort, implicitSlots = lists,
         implicitsCannotBeChanged = item.implicitsCannotBeChanged or nil, rollLines = #rolls > 0 and rolls or nil }
     end
@@ -2574,6 +2668,7 @@ function M.item_corrupt(params)
         local value = tonumber(roll.value)
         if not value or value < 0.78 or value > 1.22 then error(string.format('rolls %d: value must be 0.78-1.22', n)) end
         local slider = controls['rollRangeSlider' .. rollLines[index].index]
+        table.insert(chosen, string.format('%s at %.2f', tostring(rollLines[index].label), value))
         slider.val = -1
         slider:SetVal((value - 0.78) / 0.44)
       end
@@ -2582,17 +2677,20 @@ function M.item_corrupt(params)
       for n, want in ipairs(params.implicits) do
         local slot = slots[n]
         if not slot then error(string.format('implicits %d: PoB shows %d implicit slot(s) for %s', n, #slots, sourceName)) end
-        if want ~= '' and want ~= 'None' and want ~= 0 and want ~= 1 then
+        if want ~= '' and want ~= 'None' then
+          -- Each pick rebuilds the paired dropdown (it drops the picked group), so
+          -- every selection is resolved against the list as it is at that moment.
           local control = controls['implicit' .. slot]
-          local index, ierr = pickFromList(control.list, want, 'implicit')
+          local index, ierr = pickFromList(control.list, want, 'implicit', matchModId(idOf))
           if not index then error(string.format('implicits %d: %s', n, ierr)) end
           control.selIndex = index
           control.selFunc()
+          table.insert(chosen, cleanText(control.list[index].label))
         end
       end
     end
     controls.save.onClick()
-    return { item = describeItem(tab.displayItem), source = sourceName }
+    return { item = describeItem(tab.displayItem), source = sourceName, chosen = chosen }
   end)
 end
 
@@ -2635,10 +2733,10 @@ function M.item_enchant(params)
       selectEntry(controls.enchantmentSource, index)
     end
     local sort
-    if params.sortBy ~= nil then
+    do
       local ok, serr = selectSort(controls.sort, params.sortBy)
       if not ok then error(serr) end
-      sort = ok.label
+      sort = ok.stat and ok.label or nil
     end
     local sources = {}
     for i, s in ipairs(controls.enchantmentSource.list) do sources[i] = { label = s.label, id = s.name } end
@@ -2656,7 +2754,8 @@ function M.item_enchant(params)
     controls.enchantment.selIndex = index
     local line = controls.enchantment.list[index].line
     controls.save.onClick()
-    return { item = describeItem(tab.displayItem), slot = slot, skill = skillName, source = sourceEntry and sourceEntry.label, added = line }
+    return { item = describeItem(tab.displayItem), slot = slot, skill = skillName, source = sourceEntry and sourceEntry.label,
+      added = line, addedLabel = cleanText(line) }
   end)
 end
 
@@ -2671,11 +2770,15 @@ local function itemDbLoaded(db)
   return not db.loading
 end
 
-local function describeDbItem(dbItem, withText)
+local function describeDbItem(dbItem, withText, sortedByStat)
   local entry = { name = dbItem.name, type = dbItem.type, baseName = dbItem.baseName, rarity = dbItem.rarity,
     league = dbItem.league, source = dbItem.source,
     levelRequirement = dbItem.requirements and dbItem.requirements.level or nil }
-  if type(dbItem.measuredPower) == 'number' and dbItem.measuredPower > -math.huge then entry.measuredPower = dbItem.measuredPower end
+  -- ListBuilder leaves measuredPower on the shared database items; it is this
+  -- call's value only when this call sorted by a stat.
+  if sortedByStat and type(dbItem.measuredPower) == 'number' and dbItem.measuredPower > -math.huge then
+    entry.measuredPower = dbItem.measuredPower
+  end
   local okSlot, slotName = pcall(dbItem.GetPrimarySlot, dbItem)
   if okSlot then entry.primarySlot = slotName end
   if dbItem.variantList and #dbItem.variantList > 1 then entry.variants = dbItem.variantList end
@@ -2781,7 +2884,7 @@ function M.search_item_db(params)
   local limit = math.min(math.max(tonumber(params.limit) or 25, 1), 500)
   local items = {}
   for i = offset + 1, math.min(#list, offset + limit) do
-    table.insert(items, describeDbItem(list[i], params.includeText == true))
+    table.insert(items, describeDbItem(list[i], params.includeText == true, control.sortDetail and control.sortDetail.stat ~= nil))
   end
   return {
     db = dbType:lower(), items = items, matched = #list, offset = offset,
@@ -2799,59 +2902,59 @@ end
 -- params: { action: 'create'|'copy'|'rename'|'delete', id?, title?, confirm? }
 -- The Manage Item Sets popup's list (ItemSetListControl): New, Copy, Rename and
 -- Delete with their name and confirmation popups, on a throwaway control over
--- the tab's own set order list.
+-- the tab's own set order list. New and Copy register the set before the name
+-- popup; its Cancel removes it again (ItemSetListControl:RenameSet), so every
+-- failure after the button is undone with that Cancel and leaves no orphan.
 function M.item_set_manage(params)
   params = type(params) == 'table' and params or {}
   local tab, err = itemsTabReady()
   if not tab then return nil, err end
   local action = tostring(params.action or '')
+  if action ~= 'create' and action ~= 'copy' and action ~= 'rename' and action ~= 'delete' then
+    return nil, 'action must be create, copy, rename or delete'
+  end
+  if action == 'delete' and params.confirm ~= true then return nil, 'deleting an item set needs confirm: true' end
+  if params.title ~= nil and not tostring(params.title):match('%S') then return nil, 'title must not be blank' end
+  if (action == 'create' or action == 'rename') and params.title == nil then return nil, 'title is required' end
   local control = Compat.construct('ItemSetListControl', nil, { 0, 0, 300, 200 }, tab)
-  local function selectSet()
-    local id = tonumber(params.id)
-    local index = id and isValueInArray(control.list, id)
-    if not index then error(string.format('item set id %s not found', tostring(params.id))) end
+  local id, index
+  if action ~= 'create' then
+    id = tonumber(params.id)
+    index = id and isValueInArray(control.list, id)
+    if not index then return nil, string.format('item set id %s not found', tostring(params.id)) end
     control.selIndex, control.selValue = index, id
-    return id, index
   end
-  local function nameAndSave(title)
-    local popup = main.popups[1]
-    if not popup or not popup.controls.edit then error('PoB opened no name popup') end
-    local text = title ~= nil and tostring(title) or popup.controls.edit.buf
-    if not tostring(text):match('%S') then error('title must not be blank') end
-    popup.controls.edit:SetText(text, true)
-    popup.controls.save.onClick()
-  end
+  if action == 'delete' and #control.list <= 1 then return nil, 'cannot delete the only item set' end
+  -- A copy keeps the copied set's name unless given one; an untitled set is the
+  -- one ItemSetListControl:GetRowValue shows as "Default".
+  local title = params.title ~= nil and tostring(params.title)
+    or (action == 'copy' and (tab.itemSets[id].title or 'Default')) or nil
+
   local popupsBefore = #main.popups
+  local namePopup
   local ok, res = pcall(function()
-    if action == 'create' then
-      if params.title == nil then error('title is required') end
-      control.controls.new.onClick()
-      nameAndSave(params.title)
-      return control.selValue
-    elseif action == 'copy' then
-      selectSet()
-      control.controls.copy.onClick()
-      nameAndSave(params.title)
-      return control.selValue
-    elseif action == 'rename' then
-      if params.title == nil then error('title is required') end
-      local id = selectSet()
-      control.controls.rename.onClick()
-      nameAndSave(params.title)
-      return id
-    elseif action == 'delete' then
-      if params.confirm ~= true then error('deleting an item set needs confirm: true') end
-      local id, index = selectSet()
-      if #control.list <= 1 then error('cannot delete the only item set') end
+    if action == 'delete' then
       control:OnSelDelete(index, id)
       local popup = main.popups[1]
-      if not popup or not popup.controls.confirm then error('PoB opened no confirmation') end
+      if #main.popups ~= popupsBefore + 1 or not popup.controls.confirm then error('PoB opened no confirmation') end
       popup.controls.confirm.onClick()
       if tab.itemSets[id] then error('PoB did not delete the item set') end
       return id
     end
-    error('action must be create, copy, rename or delete')
+    local button = action == 'create' and control.controls.new or action == 'copy' and control.controls.copy or control.controls.rename
+    button.onClick()
+    namePopup = main.popups[1]
+    if #main.popups ~= popupsBefore + 1 or not namePopup.controls.edit then error('PoB opened no name popup') end
+    namePopup.controls.edit:SetText(title, true)
+    if not namePopup.controls.save:IsEnabled() then error('PoB refused the name "' .. title .. '"') end
+    namePopup.controls.save.onClick()
+    namePopup = nil
+    return action == 'rename' and id or control.selValue
   end)
+  if not ok and namePopup and main.popups[1] == namePopup then
+    -- Cancel removes a set New or Copy registered (ItemSetListControl:RenameSet).
+    pcall(namePopup.controls.cancel.onClick)
+  end
   while #main.popups > popupsBefore do main:ClosePopup() end
   if not ok then return nil, cleanError(res) end
   M.get_main_output()
@@ -2881,6 +2984,45 @@ function M.list_shared_items(params)
     table.insert(sets, { index = i, title = set.title or 'Default', slots = slots })
   end
   return { items = items, itemSets = sets }
+end
+
+-- Items tab state the crafting calls must leave as they found it: the display
+-- item, the "Modifier sorting" choice, the scroll target and open popups. With
+-- the display item's first affix dropdown when it is a crafted item, whose
+-- order that sort decides. Read only.
+function M.items_tab_state()
+  local tab, err = itemsTabReady()
+  if not tab then return nil, err end
+  local item = tab.displayItem
+  local sortEntry = tab.controls.craftingSorting.list[tab.controls.craftingSorting.selIndex]
+  local state = {
+    displayItem = item and item.name or nil,
+    displayItemText = item and item:BuildRaw() or nil,
+    craftingSort = sortEntry and sortEntry.label or nil,
+    craftingSortIndex = tab.controls.craftingSorting.selIndex,
+    snapHScroll = tab.snapHScroll,
+    popups = #main.popups,
+  }
+  if item and item.crafted then
+    state.firstAffixOptions = labelsOf(tab.controls.displayItemAffix1.list)
+  end
+  return state
+end
+
+-- params: { text }
+-- Shows an item in the Items tab, as double-clicking it in a list does
+-- (ItemsTab:CreateDisplayItemFromRaw). It replaces nothing: it refuses while the
+-- tab already shows an item, which may hold the user's unsaved edits.
+function M.items_tab_show_item(params)
+  params = type(params) == 'table' and params or {}
+  local tab, err = itemsTabReady()
+  if not tab then return nil, err end
+  if tab.displayItem then return nil, 'the Items tab already shows an item; it may hold unsaved edits, so it is not replaced' end
+  local item, perr = parseItemText(params.text)
+  if not item then return nil, perr end
+  tab:CreateDisplayItemFromRaw(params.text:gsub('\r\n', '\n'), true)
+  if not tab.displayItem then return nil, 'PoB did not show the item' end
+  return M.items_tab_state()
 end
 
 return M

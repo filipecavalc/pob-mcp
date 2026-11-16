@@ -265,6 +265,8 @@ return function(BuildOps, Compat, host)
   handlers.search_item_db = op(BuildOps.search_item_db, 'result')
   handlers.item_set_manage = op(BuildOps.item_set_manage, 'result')
   handlers.list_shared_items = op(BuildOps.list_shared_items, 'result')
+  handlers.items_tab_state = op(BuildOps.items_tab_state, 'result')
+  handlers.items_tab_show_item = op(BuildOps.items_tab_show_item, 'result')
 
   handlers.get_capabilities = function()
     -- quit ends the stdio bridge's read loop; the desktop app's server has no such loop.

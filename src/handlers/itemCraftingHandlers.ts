@@ -72,6 +72,10 @@ export interface CraftedItem {
 export interface ModOption {
   index: number;
   label?: string;
+  /** "index:label" as PoB listed it; pickFromList checks it when it is used. */
+  pick?: string;
+  /** PoB's mod id where it has one (stable across calls). */
+  id?: string;
   lines?: string[];
   type?: string;
   affix?: string;
@@ -98,6 +102,8 @@ interface CraftResult {
   sortBy?: string;
   added?: { lines?: string[] } | string;
   addedLabel?: string;
+  addedId?: string;
+  chosen?: string[];
   removed?: boolean;
   [key: string]: unknown;
 }
@@ -159,8 +165,16 @@ export function formatCraftedItem(item: CraftedItem): string[] {
   return lines;
 }
 
+/**
+ * How to name an option in a later call. PoB rebuilds and re-sorts these lists,
+ * so a bare index is refused: pass the label text, an id, or "index:label"
+ * exactly as listed (checked against the list at the time of the click).
+ */
+export const PICK_HINT = 'by text, [id] or "index:label" as listed; a bare index is refused';
+
 function formatOption(option: ModOption): string {
   const parts = [`${option.index}. ${option.label ?? option.lines?.join(" / ") ?? ""}`];
+  if (option.id) parts.push(`[${option.id}]`);
   const meta = [
     // Bench, veiled and delve labels already end in "(Prefix)" / "(Suffix)".
     option.type && !option.label?.includes(`(${option.type})`) ? option.type : undefined,
@@ -226,6 +240,12 @@ async function runCraft(
   const result = await luaClient.itemsTabAction<CraftResult>(action, defined(params));
   const lines = [`=== ${title} ===`, ""];
   if (result.item) {
+    const chosen = [
+      result.addedLabel ? `${result.group ? `${result.group} → ` : ""}${result.addedLabel}${result.addedId ? ` [${result.addedId}]` : ""}` : undefined,
+      ...(result.chosen ?? []),
+      result.removed ? "enchantment removed" : undefined,
+    ].filter(Boolean);
+    if (chosen.length) lines.push(`Chosen: ${chosen.join("; ")}`, "");
     lines.push(...formatCraftedItem(result.item));
     lines.push(...await followUp(context, result.item, args));
   } else {
@@ -290,7 +310,7 @@ export async function handleCraftItemAffixes(
   return wrapHandler("set item affixes", async () => {
     const luaClient = await client(context);
     const result = await luaClient.itemsTabAction<CraftResult & {
-      applied?: Array<{ type: string; index: number; modId?: string; affix?: string; lines?: string[]; range?: number; tier?: number }>;
+      applied?: Array<{ type: string; index: number; label?: string; modId?: string; affix?: string; lines?: string[]; range?: number; tier?: number }>;
       listed?: { type: string; index: number; selected: number };
     }>("item_craft_affixes", defined({
       text: args.item_text, changes: args.changes, list: args.list, listIndex: args.list_index,
@@ -302,13 +322,13 @@ export async function handleCraftItemAffixes(
       for (const change of result.applied) {
         lines.push(change.modId === "None"
           ? `  ${change.type} ${change.index}: cleared`
-          : `  ${change.type} ${change.index}: ${change.affix ?? ""} [${change.modId}]${change.tier ? ` T${change.tier}` : ""}${change.range !== undefined ? ` roll ${fmt(change.range)}` : ""} — ${change.lines?.join(" / ") ?? ""}`);
+          : `  ${change.type} ${change.index}: ${change.label ? `${change.label} → ` : ""}${change.affix ?? ""} [${change.modId}]${change.tier ? ` T${change.tier}` : ""}${change.range !== undefined ? ` roll ${fmt(change.range)}` : ""} — ${change.lines?.join(" / ") ?? ""}`);
       }
       lines.push("");
     }
     if (result.item) lines.push(...formatCraftedItem(result.item));
     if (result.options && result.listed) {
-      lines.push("", `Options for ${result.listed.type} ${result.listed.index}${result.sortBy ? ` (sorted by ${result.sortBy})` : ""} — pass modifier (index, text or modId) with tier (1 = best) and roll (0-1):`);
+      lines.push("", `Options for ${result.listed.type} ${result.listed.index}${result.sortBy ? ` (sorted by ${result.sortBy})` : ""} — pass modifier (${PICK_HINT}; a tier's mod id picks that tier) with tier (1 = best) and roll (0-1):`);
       lines.push(...formatOptions(result.options, result.matched, result.options.length <= 10));
     }
     if (result.applied?.length) lines.push(...await followUp(context, result.item, args));
@@ -335,16 +355,25 @@ export async function handleCraftItemProperties(
       ranges: args.ranges, removeModifiers: args.remove_modifiers,
     }));
     const lines = ["=== Item properties ===", ""];
+    const applied = result.applied as { influences?: string[]; ranges?: Array<{ line: string; roll: number }>; removed?: string[]; clusterSkill?: string; catalyst?: string } | undefined;
+    const chosen = [
+      applied?.influences ? `influences: ${applied.influences.join(", ") || "none"}` : undefined,
+      applied?.catalyst ? `catalyst: ${applied.catalyst}` : undefined,
+      applied?.clusterSkill ? `cluster skill: ${applied.clusterSkill}` : undefined,
+      ...(applied?.ranges ?? []).map((r) => `roll ${fmt(r.roll)}: ${r.line}`),
+      ...(applied?.removed ?? []).map((line) => `removed: ${line}`),
+    ].filter(Boolean);
+    if (chosen.length) lines.push(`Chosen: ${chosen.join("; ")}`, "");
     if (result.item) lines.push(...formatCraftedItem(result.item));
     if (result.influenceOptions) lines.push("", `Influences PoB offers: ${result.influenceOptions.slice(1).join(", ")}`);
     if (result.catalystOptions) lines.push(`Catalysts PoB offers: ${result.catalystOptions.slice(1).join(", ")}`);
     if (result.clusterSkills) lines.push(`Cluster jewel skills: ${result.clusterSkills.join(", ")}`);
     if (result.clusterNodeCount) lines.push(`Added passives: ${result.clusterNodeCount.value ?? "?"} (${result.clusterNodeCount.min}-${result.clusterNodeCount.max})`);
     if (result.rangeLines?.length) {
-      lines.push("Range lines (ranges: [{ line, roll 0-1 }]):", ...result.rangeLines.map((r) => `  ${r.index}. ${r.line}${r.roll !== undefined ? ` (roll ${fmt(r.roll)})` : ""}`));
+      lines.push(`Range lines (ranges: [{ line, roll 0-1 }]; ${PICK_HINT}):`, ...result.rangeLines.map((r) => `  ${r.index}. ${r.line}${r.roll !== undefined ? ` (roll ${fmt(r.roll)})` : ""}`));
     }
     if (result.removableModifiers?.length) {
-      lines.push("Removable modifiers (remove_modifiers):", ...result.removableModifiers.map((r) => `  ${r.index}. ${r.line} (${r.kind})`));
+      lines.push(`Removable modifiers (remove_modifiers; ${PICK_HINT}):`, ...result.removableModifiers.map((r) => `  ${r.index}. ${r.line} (${r.kind})`));
     }
     const changed = ["influences", "quality", "catalyst", "catalyst_quality", "cluster_skill", "cluster_node_count", "ranges", "remove_modifiers"]
       .some((key) => (args as unknown as Record<string, unknown>)[key] !== undefined);
@@ -362,7 +391,7 @@ export async function handleCraftItemAddModifier(
     sortBy: args.sort_by, search: args.search, limit: args.limit,
   }, args, (result) => [
     `Sources: ${formatSources(result.sources) ?? "-"}`,
-    `Listing source ${result.source}${result.sortBy ? `, sorted by ${result.sortBy}` : ""} — pass modifier (index or text) to add one:`,
+    `Listing source ${result.source}${result.sortBy ? `, sorted by ${result.sortBy}` : ""} — pass modifier to add one (${PICK_HINT}):`,
     ...formatOptions(result.options, result.matched),
   ]));
 }
@@ -377,12 +406,12 @@ export async function handleCraftItemAddImplicit(
   }, args, (result) => result.groups
     ? [
       `Sources: ${formatSources(result.sources) ?? "-"}`,
-      `Implicit types of ${result.source}${result.sortBy ? `, sorted by ${result.sortBy}` : ""} — pass group (index or text) to list its modifiers:`,
+      `Implicit types of ${result.source}${result.sortBy ? `, sorted by ${result.sortBy}` : ""} — pass group to list its modifiers (${PICK_HINT}):`,
       ...formatOptions(result.groups, result.matched),
     ]
     : [
       `Sources: ${formatSources(result.sources) ?? "-"}`,
-      `Modifiers of ${result.source} / ${result.group ?? ""}${result.sortBy ? `, sorted by ${result.sortBy}` : ""} — pass modifier (index or text) to add one:`,
+      `Modifiers of ${result.source} / ${result.group ?? ""}${result.sortBy ? `, sorted by ${result.sortBy}` : ""} — pass modifier to add one (${PICK_HINT}):`,
       ...formatOptions(result.options, result.matched),
     ]));
 }
@@ -400,9 +429,9 @@ export async function handleCraftItemCorrupt(
     const lines = [`Sources: ${formatSources(result.sources) ?? "-"}; listing ${result.source}${result.sortBy ? `, sorted by ${result.sortBy}` : ""}`];
     if (result.implicitsCannotBeChanged) lines.push("PoB: this item's implicits cannot be changed.");
     for (const slot of slots) {
-      lines.push("", `Implicit #${slot.slot} (${slot.kind}) — implicits[${slot.slot - 1}]:`, ...formatOptions(slot.options, slot.matched));
+      lines.push("", `Implicit #${slot.slot} (${slot.kind}) — implicits[${slot.slot - 1}] (${PICK_HINT}; each pick rebuilds the paired list):`, ...formatOptions(slot.options, slot.matched));
     }
-    if (rolls.length) lines.push("", "Roll range lines (rolls: [{ line, value 0.78-1.22 }]):", ...rolls.map((r) => `  ${r.index}. ${r.line}`));
+    if (rolls.length) lines.push("", `Roll range lines (rolls: [{ line, value 0.78-1.22 }]; ${PICK_HINT}):`, ...rolls.map((r) => `  ${r.index}. ${r.line}`));
     return lines;
   }));
 }
@@ -419,7 +448,7 @@ export async function handleCraftItemEnchant(
     const lines: string[] = [];
     if (skills?.length) lines.push(`Skills (${skills.length}): ${skills.slice(0, 40).join(", ")}${skills.length > 40 ? ", ..." : ""}`);
     lines.push(`Sources: ${formatSources(result.sources) ?? "-"}`);
-    lines.push(`Listing${result.skill ? ` skill ${result.skill as string},` : ""} source ${typeof result.source === "string" ? result.source : ""}${result.sortBy ? `, sorted by ${result.sortBy}` : ""} — pass enchantment (index or text):`);
+    lines.push(`Listing${result.skill ? ` skill ${result.skill as string},` : ""} source ${typeof result.source === "string" ? result.source : ""}${result.sortBy ? `, sorted by ${result.sortBy}` : ""} — pass enchantment (${PICK_HINT}):`);
     lines.push(...formatOptions(result.options, result.matched));
     return lines;
   }));

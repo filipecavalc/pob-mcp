@@ -42,6 +42,7 @@ local MODIFIES_BUILD = {
 local OPENS_POPUPS = {
   item_craft_create = true, item_craft_affixes = true, item_craft_properties = true, item_add_modifier = true,
   item_add_implicit = true, item_corrupt = true, item_enchant = true, item_set_manage = true,
+  items_tab_show_item = true,
 }
 -- Actions that work without a build open.
 local NO_BUILD_NEEDED = { ping = true, version = true, get_capabilities = true, gui_status = true,

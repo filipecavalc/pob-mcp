@@ -438,7 +438,10 @@ orders and the item text are PoB's. Crafting tools take item text and return
 item text; `simulate_slot` runs `lua_simulate` on the result and `equip_slot`
 adds it through `add_item`. Listing calls accept `sort_by` (a stat such as
 `FullDPS` or `Life`), which ranks the options by PoB's calculation on the loaded
-build, as the popups' "Sort by" does.
+build, as the popups' "Sort by" does; without it PoB's Default order is used.
+Options are chosen by their label text, a mod id, or `index:label` exactly as
+listed. A bare index is refused: PoB rebuilds and re-sorts these lists on every
+pick, so an index alone could name another option.
 
 | Tool | PoB feature |
 |---|---|
@@ -642,10 +645,11 @@ before interpreting the stats.
 ```
 1. craft_item_create (base: "Hubris Circlet", rarity: "RARE")
 2. craft_item_affixes (item_text, list: "prefix", sort_by: "Life")
-3. craft_item_affixes (item_text, changes: [{ type: "prefix", modifier: "maximum Life", tier: 1, roll: 1 }])
-4. craft_item_add_modifier (item_text, source: "MASTER", modifier: ...)
-5. craft_item_corrupt (item_text, implicits: [...], simulate_slot: "Helmet")
-6. add_item (item_text, slot_name: "Helmet")   or equip_slot on any craft_item_* call
+3. craft_item_affixes (item_text, changes: [{ type: "prefix", modifier: "IncreasedLife9" }])        ← a tier's mod id from the listing
+4. craft_item_add_modifier (item_text, source: "MASTER", search: "Lightning")
+5. craft_item_add_modifier (item_text, source: "MASTER", modifier: "+(29-35)% to Lightning Resistance (Suffix)")
+6. craft_item_corrupt (item_text, implicits: ["(4-6)% increased maximum Life"], simulate_slot: "Helmet")
+7. add_item (item_text, slot_name: "Helmet")   or equip_slot on any craft_item_* call
 ```
 
 ---

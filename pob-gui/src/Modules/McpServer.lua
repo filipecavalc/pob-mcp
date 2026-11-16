@@ -42,10 +42,16 @@ local MODIFIES_BUILD = {
   -- Party tab
   party_import = true, party_clear = true, party_disable_effects = true, party_rebuild = true,
   party_set_export_support = true,
+  -- Tree tab: tattoos change nodes (node_power and find_timeless_jewel only read).
+  apply_tattoo = true, remove_tattoos = true,
 }
 -- Compare tab: copying a tree, item or config from a compared build changes the
 -- open build. The other compare_* actions change only the Compare tab's list.
 MODIFIES_BUILD.compare_copy = true
+-- Actions that open one of PoB's own dialogs for the length of the call and
+-- put back state the user's open dialog may still hold (the timeless jewel
+-- finder restores build.timelessData; the tattoo editor its per-node choice).
+local OPENS_DIALOG = { find_timeless_jewel = true, list_tattoos = true }
 -- Actions that work without a build open.
 local NO_BUILD_NEEDED = { ping = true, version = true, get_capabilities = true, gui_status = true,
   new_build = true, load_build_xml = true, open_build = true, show_panel = true,
@@ -183,7 +189,7 @@ function Server:Handle(request)
   local action, params = request.action, request.params or {}
   local build = openBuild(main)
 
-  if (REPLACES_BUILD[action] or MODIFIES_BUILD[action]) and main.popups[1] then
+  if (REPLACES_BUILD[action] or MODIFIES_BUILD[action] or OPENS_DIALOG[action]) and main.popups[1] then
     return { ok = false, error = "a dialog is open in Path of Building; finish or close it first" }
   end
   if REPLACES_BUILD[action] and build and params.force ~= true then

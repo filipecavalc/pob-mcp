@@ -28,6 +28,7 @@ Uses an **unmodified [PathOfBuildingCommunity](https://github.com/PathOfBuilding
 - **Node Search**: Search the passive tree for nodes by name or stat text
 - **Character Level**: Set level and watch all stats update accordingly
 - **Anointment Ranking**: Simulate every anointable notable through PoB's live calculator and rank by DPS/EHP impact
+- **Tree Tab Tools**: PoB's node power report, its timeless jewel finder (with trade URLs) and its tattoo editor
 
 ### Item & Skill Management (Lua Bridge)
 - **Items**: Add items from PoE clipboard text, view all equipped gear
@@ -457,6 +458,11 @@ loaded build and fetches crafting/currency context from network services.
 | `analyze_cluster_jewels` | Analyze a cluster jewel setup from a build file |
 | `analyze_build_cluster_jewels` | Analyze cluster jewels equipped in the loaded build |
 | `suggest_crafting` | Suggest crafting methods using a slot, base, desired mods, and available build context |
+| `get_node_power` | PoB's own node power report (Tree tab "Show Node Power" / "Show Power Report") for one stat, with path cost and value per point |
+| `find_timeless_jewel` | PoB's "Find Timeless Jewel" seed search for a socket and desired node stats, with its "Open Trade URL" links as text |
+| `list_tattoos` | Tattoos (or runegrafts) PoB offers for a node, with its current tattoo and the build's tattoo count |
+| `apply_tattoo` | Apply a tattoo with PoB's tattoo editor and report the stat changes |
+| `remove_tattoos` | Remove one node's tattoo, or all of them (PoB's "Remove All Tattoos", needs `confirm: true`) |
 
 **`suggest_optimal_nodes` goals**: `damage`, `defense`, `life`, `es`, `resist`, `speed`
 

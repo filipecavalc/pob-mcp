@@ -343,7 +343,8 @@ function M.set_tree(params)
   end
   local mastery = params.masteryEffects or {}
   local treeVersion = params.treeVersion
-  M.import_from_node_list(build.spec, classId, ascendId, secondaryId, nodes, {}, mastery, treeVersion)
+  -- Pass the spec's tattoos (hashOverrides) back in: ImportFromNodeList replaces them with its argument.
+  M.import_from_node_list(build.spec, classId, ascendId, secondaryId, nodes, build.spec.hashOverrides, mastery, treeVersion)
   M.get_main_output()
   return true
 end
@@ -408,7 +409,8 @@ function M.update_tree_delta(params)
   local tv = params.treeVersion or current.treeVersion
   -- import_from_node_list merges the spec's existing mastery selections
   -- underneath params.masteryEffects itself, so a bare pass-through is enough.
-  M.import_from_node_list(build.spec, tonumber(classId) or 0, tonumber(ascendId) or 0, tonumber(secId) or 0, nodes, {}, params and params.masteryEffects, tv)
+  -- Keep the spec's tattoos (hashOverrides); ImportFromNodeList replaces them with its argument.
+  M.import_from_node_list(build.spec, tonumber(classId) or 0, tonumber(ascendId) or 0, tonumber(secId) or 0, nodes, build.spec.hashOverrides, params and params.masteryEffects, tv)
   M.get_main_output()
 
   -- Report what PoB actually allocated. Requesting a node is not the same as
@@ -4473,6 +4475,759 @@ function M.party_set_export_support(params)
     if ok and type(textOut) == 'string' and textOut ~= '' then exports[pair[2]] = textOut end
   end
   return { exportSupport = partyTab.enableExportBuffs == true, exports = exports }
+end
+
+-------------------------------------------------------------------------------
+-- Passive tree features of PoB's Tree tab: the node power report, the timeless
+-- jewel finder and tattoos. Each one runs the TreeTab / CalcsTab code behind
+-- the desktop app's own buttons, so the numbers and lists are PoB's.
+-------------------------------------------------------------------------------
+
+local function treeReady()
+  if not build or not build.spec or not build.treeTab or not build.calcsTab then
+    return nil, 'build/tree not initialized'
+  end
+  return true
+end
+
+-- The timeless jewel finder and the tattoo editor live in PoB's popup dialogs
+-- (TreeTab:FindTimelessJewel, TreeTab:ModifyNodePopup). They are opened, used
+-- and closed within one call, so nothing is ever drawn. withDialog closes only
+-- the dialogs it opened: one already open (in the desktop app, the user's) stays.
+-- open() opens one PoB dialog, use(popup) works with it. Every dialog opened
+-- here is closed afterwards, also on error (PoB's own buttons close theirs).
+local function withDialog(open, use)
+  local before = #main.popups
+  local opened, openErr = pcall(open)
+  if not opened then
+    while #main.popups > before do main:ClosePopup() end
+    return nil, tostring(openErr)
+  end
+  local popup = main.popups[1]
+  if #main.popups <= before or not popup then return nil, 'PoB did not open its dialog' end
+  local ok, res, err = pcall(use, popup)
+  while #main.popups > before do main:ClosePopup() end
+  if not ok then return nil, tostring(res) end
+  return res, err
+end
+
+-- Pick an entry of a PoB dropdown the way a click does: set the index, then
+-- run the control's selFunc (DropDownControl calls selFunc(index, value)).
+local function pickDropDown(control, index)
+  control.selIndex = index
+  if control.selFunc then control.selFunc(index, control.list[index]) end
+end
+
+local function lowerText(value)
+  return stripColourCodes(tostring(value or '')):lower()
+end
+
+-- Main output values reported before/after a tree change.
+local TREE_CHANGE_STATS = { 'Life', 'EnergyShield', 'Mana', 'TotalEHP', 'CombinedDPS', 'FullDPS', 'Str', 'Dex', 'Int' }
+local function treeChangeStats()
+  local out = build.calcsTab and build.calcsTab.mainOutput or {}
+  local stats = {}
+  for _, key in ipairs(TREE_CHANGE_STATS) do
+    if type(out[key]) == 'number' then stats[key] = out[key] end
+  end
+  return stats
+end
+
+---------------------------------------------------------------- Node power ---
+
+-- TreeTab's "Show Node Power" stat dropdown offers data.powerStatList minus the
+-- entries flagged ignoreForNodes (TreeTab.lua, self.powerStatList).
+local function nodePowerStats()
+  local list = {}
+  for _, stat in ipairs(data.powerStatList) do
+    if not stat.ignoreForNodes then table.insert(list, stat) end
+  end
+  return list
+end
+
+-- Run CalcsTab:PowerBuilder to completion. CalcsTab:BuildPower resumes the
+-- same function as a coroutine over several frames (it yields every 100 ms
+-- of GetTime); here its own coroutine is resumed until it finishes.
+local function runPowerBuilder(calcsTab, stat, maxDepth)
+  local savedStat, savedDepth = calcsTab.powerStat, calcsTab.nodePowerMaxDepth
+  local savedProgress = build.powerBuilderProgressCallback
+  calcsTab.powerStat = stat
+  calcsTab.nodePowerMaxDepth = maxDepth
+  -- The progress callback only feeds the Tree tab's toast, which this run has none of.
+  build.powerBuilderProgressCallback = nil
+  local started = os.clock()
+  local co = coroutine.create(calcsTab.PowerBuilder)
+  local resumes, ok, err = 0, true, nil
+  while coroutine.status(co) ~= 'dead' do
+    local resumed, msg = coroutine.resume(co, calcsTab)
+    resumes = resumes + 1
+    if not resumed then ok, err = false, msg break end
+  end
+  local seconds = os.clock() - started
+  calcsTab.powerStat, calcsTab.nodePowerMaxDepth = savedStat, savedDepth
+  build.powerBuilderProgressCallback = savedProgress
+  -- node.power now holds this stat; a heat map shown in the desktop app
+  -- rebuilds with its own stat on its next frame.
+  calcsTab.powerBuildFlag = true
+  return ok, err, seconds, resumes
+end
+
+-- params: { stat? (default CombinedDPS), maxDepth?, filter? ('unallocated'|'unallocated_and_clusters'|'allocated'),
+--           showMasteries?, sortBy? ('power'|'per_point'|'points'|'type'), types?, limit? }
+-- The report is TreeTab:BuildPowerReportList, filtered and sorted by PoB's
+-- PowerReportListControl (ReList / ReSort), as the "Show Power Report" list.
+function M.node_power(params)
+  local ready, readyErr = treeReady()
+  if not ready then return nil, readyErr end
+  params = params or {}
+  local wanted = lowerText(params.stat or 'CombinedDPS')
+  local stat
+  local choices = {}
+  for _, entry in ipairs(nodePowerStats()) do
+    if entry.stat then table.insert(choices, entry.stat .. ' (' .. entry.label .. ')') end
+    if (entry.stat and entry.stat:lower() == wanted) or entry.label:lower() == wanted then stat = entry end
+  end
+  if not stat then
+    return nil, 'unknown node power stat "' .. tostring(params.stat) .. '"; PoB offers: ' .. table.concat(choices, ', ')
+  end
+  if not stat.stat then
+    -- PowerReportListControl:SetReport: the combined heat map has no report.
+    return nil, '"' .. stat.label .. '" has no power report in PoB (only the heat map); choose a specific stat'
+  end
+  local maxDepth = params.maxDepth ~= nil and tonumber(params.maxDepth) or nil
+  if maxDepth ~= nil and maxDepth < 1 then return nil, 'maxDepth must be at least 1' end
+  local sortColumns = { type = 1, power = 3, points = 4, per_point = 5 }
+  local sortBy = params.sortBy or 'power'
+  if not sortColumns[sortBy] then return nil, 'sortBy must be power, per_point, points or type' end
+  local filter = params.filter or 'unallocated'
+  if filter ~= 'unallocated' and filter ~= 'unallocated_and_clusters' and filter ~= 'allocated' then
+    return nil, 'filter must be unallocated, unallocated_and_clusters or allocated'
+  end
+
+  local output, outErr = M.get_main_output()
+  if not output then return nil, outErr end
+  local calcsTab = build.calcsTab
+  local done, runErr, seconds, resumes = runPowerBuilder(calcsTab, stat, maxDepth)
+  if not done then return nil, 'PoB power builder failed: ' .. tostring(runErr) end
+
+  local report = build.treeTab:BuildPowerReportList(stat)
+  local list = new('PowerReportListControl', nil, { 0, 0, 700, 170 }, nil)
+  list:SetReport(stat, report)
+  list.showClusters = filter == 'unallocated_and_clusters'
+  list.allocated = filter == 'allocated'
+  list.showMasteries = params.showMasteries ~= false
+  list:ReList()
+  list:ReSort(sortColumns[sortBy])
+
+  local types
+  if type(params.types) == 'table' and #params.types > 0 then
+    types = {}
+    for _, t in ipairs(params.types) do types[tostring(t):lower()] = true end
+  end
+  local limit = math.min(math.max(tonumber(params.limit) or 25, 1), 500)
+  local nodes = {}
+  for _, entry in ipairs(list.list) do
+    if #nodes >= limit then break end
+    if not types or types[tostring(entry.type or ''):lower()] then
+      local specNode = build.spec.nodes[entry.id]
+      local path
+      if specNode and not entry.allocated and type(specNode.path) == 'table' then
+        path = {}
+        for _, pathNode in ipairs(specNode.path) do table.insert(path, pathNode.id) end
+      end
+      local statLines = {}
+      for _, line in ipairs(entry.sd or {}) do table.insert(statLines, stripColourCodes(line)) end
+      table.insert(nodes, {
+        id = entry.id,
+        name = stripColourCodes(entry.name),
+        type = entry.type,
+        power = entry.power,
+        perPoint = entry.pathPower,
+        -- PoB's "Points" column; 1000 is its "Anoint" (no path from the tree).
+        points = entry.pathDist,
+        allocated = entry.allocated and true or false,
+        path = path,
+        stats = statLines,
+      })
+    end
+  end
+
+  -- TreeTab:BuildPowerReportList scales percentage stats by 100 and formats
+  -- with the matching sidebar entry of build.displayStats.
+  local displayStat
+  for _, ds in ipairs(build.displayStats or {}) do
+    if ds.stat == stat.stat then displayStat = ds break end
+  end
+  -- CalcsTab:PowerBuilder compares every node against the misc calculator's base output.
+  local _, calcBase = calcsTab:GetMiscCalculator()
+  return {
+    stat = stat.stat,
+    label = stat.label,
+    base = data.powerStatList.GetFromOutput(calcBase, stat),
+    scale = (displayStat and (displayStat.pc or displayStat.mod)) and 100 or 1,
+    fmt = displayStat and displayStat.fmt or '.1f',
+    lowerIsBetter = displayStat and displayStat.lowerIsBetter or false,
+    maxDepth = maxDepth,
+    filter = filter,
+    sortBy = sortBy,
+    showMasteries = list.showMasteries,
+    listed = #list.list,
+    reportSize = #report,
+    seconds = seconds,
+    resumes = resumes,
+    nodes = nodes,
+  }
+end
+
+---------------------------------------------------------- Timeless jewels ---
+
+-- Patch PoB functions for the length of fn(): OpenURL and Copy capture the
+-- trade URL instead of opening a browser, and TradeQueryRequests:FetchLeagues
+-- does nothing, so opening the finder fetches no league list (the league comes
+-- from the caller).
+local function withTradeStubs(fn)
+  if not common.classes.TradeQueryRequests then LoadModule('Classes/TradeQueryRequests') end
+  local requests = common.classes.TradeQueryRequests
+  local savedOpen, savedCopy, savedFetch = OpenURL, Copy, requests.FetchLeagues
+  local captured = {}
+  OpenURL = function(url) table.insert(captured, url) end
+  Copy = function() end
+  requests.FetchLeagues = function() end
+  local ok, res, err = pcall(fn, captured)
+  OpenURL, Copy, requests.FetchLeagues = savedOpen, savedCopy, savedFetch
+  if not ok then return nil, tostring(res) end
+  return res, err
+end
+
+-- The finder stores its settings and results in build.timelessData, which PoB
+-- saves with the build. A search through the MCP is a query: put it back.
+local function withTimelessStateRestored(fn)
+  local treeTab = build.treeTab
+  local savedData = copyTable(build.timelessData)
+  local savedTab = {
+    tradeTypeIndex = treeTab.tradeTypeIndex,
+    selectedRealmIndex = treeTab.selectedRealmIndex,
+    timelessJewelLeagueSelect = treeTab.timelessJewelLeagueSelect,
+    lastSearchMore = treeTab.lastSearchMore,
+  }
+  local savedModFlag, savedTreeModFlag = build.modFlag, treeTab.modFlag
+  local ok, res, err = pcall(fn)
+  local timelessData = build.timelessData
+  wipeTable(timelessData)
+  for k, v in pairs(savedData) do timelessData[k] = v end
+  for k, v in pairs(savedTab) do treeTab[k] = v end
+  build.modFlag, treeTab.modFlag = savedModFlag, savedTreeModFlag
+  if not ok then return nil, tostring(res) end
+  return res, err
+end
+
+local function matchListEntry(list, wanted, fields)
+  if wanted == nil then return nil end
+  if type(wanted) == 'number' or tonumber(wanted) then
+    local n = tonumber(wanted)
+    for i, entry in ipairs(list) do
+      if entry.id == n then return i end
+    end
+  end
+  local text = lowerText(wanted)
+  for i, entry in ipairs(list) do
+    for _, field in ipairs(fields) do
+      if entry[field] ~= nil and lowerText(entry[field]) == text then return i end
+    end
+  end
+  local found
+  for i, entry in ipairs(list) do
+    for _, field in ipairs(fields) do
+      if entry[field] ~= nil and lowerText(entry[field]):find(text, 1, true) then
+        if found and found ~= i then return nil, 'ambiguous' end
+        found = i
+      end
+    end
+  end
+  return found
+end
+
+local function labelsOf(list)
+  local labels = {}
+  for _, entry in ipairs(list) do table.insert(labels, stripColourCodes(entry.label or tostring(entry))) end
+  return labels
+end
+
+-- "Search for Node" entries (buildMods in TreeTab:FindTimelessJewel) are
+-- labelled "<name>     <first stat line>"; the name is what precedes the gap.
+local function timelessModName(entry)
+  local label = stripColourCodes(entry.label or '')
+  return (label:match('^(.-)%s%s%s') or label)
+end
+
+local function describeTimelessOptions(controls)
+  local mods = {}
+  for _, entry in ipairs(controls.nodeSelect.list) do
+    if entry.id then
+      table.insert(mods, { id = entry.id, name = timelessModName(entry), stats = entry.descriptions, totalMod = entry.totalMod or nil })
+    end
+  end
+  local sockets = {}
+  for _, entry in ipairs(controls.socketSelect.list) do
+    table.insert(sockets, { id = entry.id, label = stripColourCodes(entry.label), keystone = entry.keystone, allocated = entry.label:sub(1, 2) == '# ' })
+  end
+  local function plain(list)
+    local out = {}
+    for i, entry in ipairs(list or {}) do out[i] = { id = entry.id, label = stripColourCodes(entry.label) } end
+    return out
+  end
+  local fallback = {}
+  for i, entry in ipairs(controls.fallbackWeightsList.list) do
+    fallback[i] = { index = i, label = entry.label, stat = entry.stat }
+  end
+  local protect = {}
+  for _, entry in ipairs(controls.protectAllocatedSelect.list or {}) do table.insert(protect, entry.label) end
+  return {
+    jewelTypes = plain(controls.jewelSelect.list),
+    jewelType = plain({ controls.jewelSelect.list[controls.jewelSelect.selIndex] })[1],
+    conquerors = plain(controls.conquerorSelect.list),
+    sockets = sockets,
+    devotionVariants = plain(controls.devotionSelect1.list),
+    abyssAscendancyOutcomes = plain(controls.abyssAscendancySelect.list),
+    fallbackWeightModes = fallback,
+    protectableNodes = protect,
+    mods = mods,
+  }
+end
+
+local TRADE_TYPES = { securable = 1, available = 2, onlineleague = 3, online = 4, any = 5 }
+local REALMS = { pc = 1, sony = 2, xbox = 3 }
+
+-- Fill in the "Find a Timeless Jewel" dialog (TreeTab:FindTimelessJewel) as a
+-- user would, then press its buttons. params:
+--   jewelType (id 1-11, label or internal name), conqueror (id or label, default Any),
+--   socketId (node id, or -1 / 'all' for PoB's "All Sockets"),
+--   desired: [{ node (mod id or name), weight?, weight2?, minWeight?, required? }],
+--   searchList / fallbackList (PoB's own "id, weight, weight2, minWeight" lines),
+--   fallbackStat (fills the fallback list with PoB's "Generate" for that stat),
+--   socketFilter, socketFilterDistance, devotion1, devotion2, totalMinimumWeight,
+--   protectNodes [names], abyssAscendancy, maxResults, optionsOnly,
+--   trade: { league, realm, tradeType, searchMore, pages, startRow }
+local function runTimelessDialog(params)
+  local treeTab = build.treeTab
+  return withDialog(function() treeTab:FindTimelessJewel() end, function(popup)
+    local controls = popup.controls
+
+    if params.jewelType ~= nil then
+      local idx = matchListEntry(controls.jewelSelect.list, params.jewelType, { 'label', 'name' })
+      if not idx then error('unknown jewelType "' .. tostring(params.jewelType) .. '"; PoB offers: ' .. table.concat(labelsOf(controls.jewelSelect.list), ', '), 0) end
+      pickDropDown(controls.jewelSelect, idx)
+    end
+    if params.optionsOnly then
+      -- The protectable list only fills with "Filter Nodes" on (setAllocatedNodes).
+      if params.socketId ~= nil then
+        local sidx = matchListEntry(controls.socketSelect.list, params.socketId == 'all' and -1 or params.socketId, { 'label', 'keystone' })
+        if sidx then pickDropDown(controls.socketSelect, sidx) end
+        controls.socketFilter.state = true
+        controls.socketFilter.changeFunc(true)
+      end
+      return describeTimelessOptions(controls)
+    end
+
+    local conqueror = params.conqueror
+    if conqueror ~= nil then
+      local idx, why = matchListEntry(controls.conquerorSelect.list, conqueror, { 'label' })
+      if not idx then error((why == 'ambiguous' and 'ambiguous' or 'unknown') .. ' conqueror "' .. tostring(conqueror) .. '"; PoB offers: ' .. table.concat(labelsOf(controls.conquerorSelect.list), ', '), 0) end
+      pickDropDown(controls.conquerorSelect, idx)
+    else
+      pickDropDown(controls.conquerorSelect, 1)
+    end
+
+    local socketWanted = params.socketId
+    if socketWanted == nil then error('socketId is required (a jewel socket node id, or "all")', 0) end
+    if socketWanted == 'all' then socketWanted = -1 end
+    local sidx = matchListEntry(controls.socketSelect.list, socketWanted, {})
+    if not sidx then error('node ' .. tostring(params.socketId) .. ' is not one of the jewel sockets PoB offers; list them with list_options', 0) end
+    pickDropDown(controls.socketSelect, sidx)
+
+    local filterOn = params.socketFilter == true
+    controls.socketFilter.state = filterOn
+    controls.socketFilter.changeFunc(filterOn)
+    if filterOn and params.socketFilterDistance ~= nil then
+      local distance = math.min(math.max(math.floor(tonumber(params.socketFilterDistance) or 0), 0), 10)
+      controls.socketFilterAdditionalDistance:SetVal(distance / 10)
+      build.timelessData.socketFilterDistance = distance
+    end
+
+    for key, control in pairs({ devotion1 = controls.devotionSelect1, devotion2 = controls.devotionSelect2 }) do
+      if params[key] ~= nil then
+        local idx = matchListEntry(control.list, params[key], { 'label' })
+        if not idx then error('unknown ' .. key .. ' "' .. tostring(params[key]) .. '"; PoB offers: ' .. table.concat(labelsOf(control.list), ', '), 0) end
+        pickDropDown(control, idx)
+      end
+    end
+
+    -- Desired nodes: PoB's search list is lines of "id, weight, weight2, minWeight".
+    local lines = {}
+    if type(params.searchList) == 'string' and params.searchList ~= '' then table.insert(lines, params.searchList) end
+    for _, want in ipairs(params.desired or {}) do
+      local idx
+      for i, entry in ipairs(controls.nodeSelect.list) do
+        if entry.id and entry.id == want.node then idx = i end
+      end
+      if not idx then
+        -- by name: the label's leading node name, then its stat lines
+        local text = lowerText(want.node)
+        local exact, partial = {}, {}
+        for i, entry in ipairs(controls.nodeSelect.list) do
+          if entry.id then
+            local name = timelessModName(entry):lower()
+            if name == text then table.insert(exact, i)
+            elseif name:find(text, 1, true) or table.concat(entry.descriptions or {}, ' '):lower():find(text, 1, true) then table.insert(partial, i) end
+          end
+        end
+        local hits = #exact > 0 and exact or partial
+        if #hits == 1 then idx = hits[1]
+        elseif #hits > 1 then
+          local names = {}
+          for i = 1, math.min(#hits, 15) do table.insert(names, controls.nodeSelect.list[hits[i]].id) end
+          error('desired node "' .. tostring(want.node) .. '" matches several mods: ' .. table.concat(names, ', '), 0)
+        else
+          error('desired node "' .. tostring(want.node) .. '" is not a ' .. stripColourCodes(controls.jewelSelect.list[controls.jewelSelect.selIndex].label) .. ' mod; list them with list_options', 0)
+        end
+      end
+      local id = controls.nodeSelect.list[idx].id
+      local minWeight = want.required and 'required' or tostring(tonumber(want.minWeight) or 0)
+      table.insert(lines, string.format('%s, %s, %s, %s', id, tostring(tonumber(want.weight) or 1), tostring(tonumber(want.weight2) or 1), minWeight))
+    end
+    controls.searchList:SetText(table.concat(lines, '\n'), true)
+    controls.searchListFallback:SetText(type(params.fallbackList) == 'string' and params.fallbackList or '', true)
+    if params.fallbackStat ~= nil then
+      local idx = matchListEntry(controls.fallbackWeightsList.list, params.fallbackStat, { 'stat', 'label' })
+      if not idx then
+        for i, entry in ipairs(controls.fallbackWeightsList.list) do
+          if entry.label:lower() == 'sort by ' .. lowerText(params.fallbackStat) then idx = i end
+        end
+      end
+      if not idx then error('unknown fallbackStat "' .. tostring(params.fallbackStat) .. '"; PoB offers: ' .. table.concat(labelsOf(controls.fallbackWeightsList.list), ', '), 0) end
+      pickDropDown(controls.fallbackWeightsList, idx)
+      controls.fallbackWeightsButton.onClick()
+    end
+    controls.totalMinimumWeight:SetText(params.totalMinimumWeight ~= nil and tostring(math.floor(tonumber(params.totalMinimumWeight) or 0)) or '', true)
+
+    if params.abyssAscendancy ~= nil then
+      if not controls.abyssAscendancyLabel.shown then error('abyssAscendancy applies to Reclaimed Malevolence only', 0) end
+      local idx = matchListEntry(controls.abyssAscendancySelect.list, params.abyssAscendancy, { 'label', 'id' })
+      if not idx then error('unknown abyssAscendancy "' .. tostring(params.abyssAscendancy) .. '"; PoB offers: ' .. table.concat(labelsOf(controls.abyssAscendancySelect.list), ', '), 0) end
+      pickDropDown(controls.abyssAscendancySelect, idx)
+    end
+
+    for _, name in ipairs(params.protectNodes or {}) do
+      if not controls.protectAllocatedLabel.shown then error('protectNodes needs socketFilter and Militant Faith or Reclaimed Malevolence (as in PoB)', 0) end
+      local idx = matchListEntry(controls.protectAllocatedSelect.list or {}, name, { 'label' })
+      if not idx then error('"' .. tostring(name) .. '" is not an allocated notable PoB can protect here; PoB offers: ' .. table.concat(labelsOf(controls.protectAllocatedSelect.list or {}), ', '), 0) end
+      controls.protectAllocatedSelect.selIndex = idx
+      controls.protectAllocatedButtonAdd.onClick()
+    end
+
+    -- PoB's Search leaves both result tables alone when it finds nothing to
+    -- search (Reclaimed Malevolence without a path to the class start): start
+    -- from empty ones so no earlier results show under this search. The
+    -- build's own results come back with the restored state.
+    wipeTable(build.timelessData.searchResults)
+    wipeTable(build.timelessData.sharedResults)
+    local started = os.clock()
+    controls.searchButton.onClick()
+    local seconds = os.clock() - started
+
+    local timelessData = build.timelessData
+    local results = timelessData.searchResults or {}
+    local shared = timelessData.sharedResults or {}
+    local desiredList = {}
+    for legionId, desired in pairs(shared.desiredNodes or {}) do
+      table.insert(desiredList, { id = legionId, name = desired.displayName, index = desired.desiredIdx, weight = desired.nodeWeight, weight2 = desired.nodeWeight2 })
+    end
+    table.sort(desiredList, function(a, b) return a.index < b.index end)
+    local maxResults = math.min(math.max(tonumber(params.maxResults) or 20, 1), 500)
+    local rows = {}
+    for i = 1, math.min(#results, maxResults) do
+      local result = results[i]
+      local matches = {}
+      for _, desired in ipairs(desiredList) do
+        local hit = result[desired.id]
+        if hit then table.insert(matches, { id = desired.id, name = desired.name, nodes = hit.targetNodeNames }) end
+      end
+      table.insert(rows, {
+        rank = i, seed = result.seed, total = result.total, socketId = result.socketId or (shared.socket and shared.socket.id),
+        socket = result.socketLabel or (shared.socket and shared.socket.label), row = (stripColourCodes(result.label):gsub('%s+', ' ')), matches = matches,
+      })
+    end
+
+    local trade
+    if params.trade and #results > 0 then
+      local t = params.trade
+      if type(t.league) ~= 'string' or t.league == '' then error('trade.league is required', 0) end
+      local realm = REALMS[lowerText(t.realm or 'pc')]
+      if not realm then error('trade.realm must be pc, sony or xbox', 0) end
+      local tradeType = TRADE_TYPES[lowerText(t.tradeType or 'securable')]
+      if not tradeType then error('trade.tradeType must be securable, available, onlineleague, online or any', 0) end
+      -- Realm and league are set without their selFuncs: those would fetch
+      -- league lists. The URL reads both straight from the dropdowns.
+      controls.realmSelection.selIndex = realm
+      controls.searchTradeLeagueSelect.list = { t.league }
+      controls.searchTradeLeagueSelect.selIndex = 1
+      pickDropDown(controls.tradeTypeSelection, tradeType)
+      controls.searchMore.state = t.searchMore == true
+      if t.startRow ~= nil then
+        controls.searchResults.selIndex = math.min(math.max(math.floor(tonumber(t.startRow) or 1), 1), #results)
+      end
+      local pages = math.min(math.max(math.floor(tonumber(t.pages) or 1), 1), 10)
+      trade = { league = t.league, realm = controls.realmSelection.list[realm], tradeType = lowerText(t.tradeType or 'securable'), searchMore = controls.searchMore.state, urls = {} }
+      local captured = params._captured
+      for _ = 1, pages do
+        local before = #captured
+        controls.searchTradeButton.onClick()
+        if #captured == before then break end
+        local first = controls.searchResults.selIndex
+        local last = math.min(controls.searchResults.highlightIndex or first, #results)
+        local seeds = {}
+        for r = first, last do table.insert(seeds, results[r].seed) end
+        table.insert(trade.urls, { url = captured[#captured], fromRank = first, toRank = last, seeds = seeds })
+      end
+    end
+
+    return {
+      jewelType = stripColourCodes(timelessData.jewelType.label or ''),
+      jewelTypeId = timelessData.jewelType.id,
+      conqueror = stripColourCodes(timelessData.conquerorType.label or ''),
+      socket = stripColourCodes(timelessData.jewelSocket.label or ''),
+      socketId = timelessData.jewelSocket.id,
+      searchList = timelessData.searchList,
+      searchListFallback = timelessData.searchListFallback,
+      desired = desiredList,
+      resultCount = #results,
+      seconds = seconds,
+      results = rows,
+      trade = trade,
+    }
+  end)
+end
+
+function M.find_timeless_jewel(params)
+  local ready, readyErr = treeReady()
+  if not ready then return nil, readyErr end
+  params = params or {}
+  if not build.calcsTab.mainEnv then M.get_main_output() end
+  return withTimelessStateRestored(function()
+    return withTradeStubs(function(captured)
+      params._captured = captured
+      local res, err = runTimelessDialog(params)
+      params._captured = nil
+      if res == nil then error(err, 0) end
+      return res
+    end)
+  end)
+end
+
+------------------------------------------------------------------ Tattoos ---
+
+-- PassiveTreeView:OnClick opens the tattoo editor (TreeTab:ModifyNodePopup)
+-- on a right click on exactly these nodes.
+local function tattooEditable(node)
+  if node.expansionSkill then return false end
+  if node.isTattoo or node.type == 'Keystone'
+    or (node.type == 'Normal' and (node.dn == 'Strength' or node.dn == 'Dexterity' or node.dn == 'Intelligence'))
+    or (node.type == 'Notable' and #(node.sd or {}) > 0 and (node.sd[1]:match('+30 to Dexterity') or node.sd[1]:match('+30 to Strength') or node.sd[1]:match('+30 to Intelligence'))) then
+    return true
+  end
+  -- unallocated masteries take runegrafts through the same dialog
+  return node.type == 'Mastery' and not node.alloc and node.masteryEffects ~= nil
+end
+
+local function tattooNode(params)
+  local id = tonumber(params and params.nodeId)
+  if not id then return nil, 'nodeId is required' end
+  local node = build.spec.nodes[id]
+  if not node then return nil, 'node ' .. id .. ' is not on this tree' end
+  return node
+end
+
+local function currentTattoo(node)
+  local override = build.spec.hashOverrides and build.spec.hashOverrides[node.id]
+  if override and override.isTattoo then
+    return { name = override.dn, stats = override.sd }
+  end
+end
+
+-- Open PoB's tattoo editor on node and hand its controls to use(); the "Show
+-- Legacy Tattoos" checkbox state is the Tree tab's (showLegacyTattoo).
+--
+-- The editor opens on modGroups[treeTab.defaultTattoo[nodeName] or 1], an
+-- index its "Add" button stores per node name. An index taken from the longer
+-- legacy list points past the end of the normal list, and PoB then fails to
+-- open the editor for every node of that name (TreeTab.lua constructUI, also
+-- on the user's own right click in the desktop app). So the open starts from
+-- no stored index. keepPoBChoice: the call pressed Add or Reset Node, whose
+-- stored value is kept when it fits the normal list (Add from the normal list,
+-- or Reset's nil); otherwise the earlier value goes back.
+local function withTattooDialog(node, includeLegacy, use, keepPoBChoice)
+  local treeTab = build.treeTab
+  local nodeName = build.spec.tree.nodes[node.id].dn
+  local savedLegacy = treeTab.showLegacyTattoo
+  local savedDefault = treeTab.defaultTattoo[nodeName]
+  treeTab.showLegacyTattoo = includeLegacy == true
+  treeTab.defaultTattoo[nodeName] = nil
+  local res, err = withDialog(function() treeTab:ModifyNodePopup(node) end, function(popup)
+    return use(popup.controls)
+  end)
+  treeTab.showLegacyTattoo = savedLegacy
+  local choice = treeTab.defaultTattoo[nodeName]
+  if not (res and keepPoBChoice) then
+    treeTab.defaultTattoo[nodeName] = savedDefault
+  elseif choice ~= nil and includeLegacy == true then
+    treeTab.defaultTattoo[nodeName] = nil
+  end
+  return res, err
+end
+
+local function tattooOptions(controls)
+  local nodes = build.spec.tree.tattoo.nodes
+  local options = {}
+  for _, entry in ipairs(controls.modSelect.list) do
+    local tattoo = nodes[entry.id]
+    table.insert(options, {
+      id = entry.id,
+      name = tattoo and tattoo.dn or timelessModName(entry),
+      stats = entry.descriptions,
+      targetType = tattoo and tattoo.targetType,
+      minimumConnected = tattoo and tattoo.MinimumConnected,
+      legacy = tattoo and tattoo.legacy or false,
+    })
+  end
+  return options
+end
+
+-- The dialog's "Tattoo Count: N/50" button label is PoB's own count.
+local function tattooCount(controls)
+  return tonumber(stripColourCodes(controls.totalTattoos.label or ''):match('(%d+)/50'))
+end
+
+-- params: { nodeId, includeLegacy? }
+function M.list_tattoos(params)
+  local ready, readyErr = treeReady()
+  if not ready then return nil, readyErr end
+  local node, err = tattooNode(params)
+  if not node then return nil, err end
+  if not tattooEditable(node) then
+    return nil, (node.dn or tostring(node.id)) .. ' (' .. tostring(node.type) .. ') cannot be tattooed in PoB: tattoos replace attribute smalls, +30 attribute notables and keystones; runegrafts go on unallocated masteries'
+  end
+  local res, dialogErr = withTattooDialog(node, params.includeLegacy, function(controls)
+    return { options = tattooOptions(controls), count = tattooCount(controls) }
+  end)
+  if not res then return nil, 'PoB could not open its tattoo dialog for this node: ' .. tostring(dialogErr) end
+  return {
+    nodeId = node.id, node = build.spec.tree.nodes[node.id].dn, type = node.type, allocated = node.alloc and true or false,
+    current = currentTattoo(node), tattooCount = res.count, tattooLimit = 50, options = res.options,
+  }
+end
+
+-- params: { nodeId, tattoo (id or name), includeLegacy? }
+-- Presses the dialog's "Add" button, as the desktop app does.
+function M.apply_tattoo(params)
+  local ready, readyErr = treeReady()
+  if not ready then return nil, readyErr end
+  local node, err = tattooNode(params)
+  if not node then return nil, err end
+  if not tattooEditable(node) then
+    return nil, (node.dn or tostring(node.id)) .. ' (' .. tostring(node.type) .. ') cannot be tattooed in PoB'
+  end
+  if params.tattoo == nil or params.tattoo == '' then return nil, 'tattoo is required' end
+  M.get_main_output()
+  local before = treeChangeStats()
+  local previous = currentTattoo(node)
+  local nodeName = build.spec.tree.nodes[node.id].dn
+  local res, dialogErr = withTattooDialog(node, params.includeLegacy, function(controls)
+    local list = controls.modSelect.list
+    local idx = matchListEntry(list, params.tattoo, { 'id' })
+    if not idx then
+      local text = lowerText(params.tattoo)
+      local hits = {}
+      for i, entry in ipairs(list) do
+        local tattoo = build.spec.tree.tattoo.nodes[entry.id]
+        if tattoo and lowerText(tattoo.dn) == text then hits = { i } break end
+        if tattoo and lowerText(tattoo.dn):find(text, 1, true) then table.insert(hits, i) end
+      end
+      if #hits ~= 1 then
+        local names = {}
+        for _, option in ipairs(tattooOptions(controls)) do table.insert(names, option.name) end
+        if #hits > 1 then
+          names = {}
+          for _, i in ipairs(hits) do table.insert(names, build.spec.tree.tattoo.nodes[list[i].id].dn) end
+        end
+        error((#hits > 1 and 'ambiguous' or 'unknown') .. ' tattoo "' .. tostring(params.tattoo) .. '" for ' .. tostring(nodeName) .. '; PoB offers: ' .. table.concat(names, ', '), 0)
+      end
+      idx = hits[1]
+    end
+    controls.modSelect.selIndex = idx
+    controls.save.onClick()
+    return { id = list[idx].id }
+  end, true)
+  if not res then return nil, tostring(dialogErr) end
+  build.buildFlag = true
+  M.advanceFrame()
+  M.get_main_output()
+  local countAfter = 0
+  for _, override in pairs(build.spec.hashOverrides) do
+    -- the dialog's count (getTattooCount): runegrafts are not tattoos
+    if override.isTattoo and not tostring(override.dn):find('Runegraft') then countAfter = countAfter + 1 end
+  end
+  return {
+    nodeId = node.id, node = nodeName, tattoo = res.id, applied = currentTattoo(build.spec.nodes[node.id]),
+    allocated = build.spec.nodes[node.id].alloc and true or false,
+    replaced = previous, tattooCount = countAfter, tattooLimit = 50, before = before, after = treeChangeStats(),
+  }
+end
+
+-- params: { nodeId } presses the tattoo dialog's "Reset Node" button;
+-- { all = true } presses "Remove All Tattoos" in the Tree tab's
+-- "Reset Tree/Tattoos" dialog.
+function M.remove_tattoos(params)
+  local ready, readyErr = treeReady()
+  if not ready then return nil, readyErr end
+  params = params or {}
+  M.get_main_output()
+  local before = treeChangeStats()
+  local removed = {}
+  local function snapshot()
+    local list = {}
+    for id, override in pairs(build.spec.hashOverrides) do
+      if override.isTattoo then list[id] = { nodeId = id, tattoo = override.dn, node = build.spec.tree.nodes[id] and build.spec.tree.nodes[id].dn } end
+    end
+    return list
+  end
+  local had = snapshot()
+  if params.all then
+    local res, err = withDialog(function() build.treeTab.controls.reset.onClick() end, function(popup)
+      popup.controls.removeTattoo.onClick()
+      return true
+    end)
+    if not res then return nil, tostring(err) end
+  else
+    local node, err = tattooNode(params)
+    if not node then return nil, err end
+    if not had[node.id] then return nil, 'node ' .. node.id .. ' has no tattoo' end
+    local res, dialogErr = withTattooDialog(node, true, function(controls)
+      controls.reset.onClick()
+      return true
+    end, true)
+    if not res then return nil, tostring(dialogErr) end
+  end
+  local left = snapshot()
+  for id, entry in pairs(had) do
+    if not left[id] then table.insert(removed, entry) end
+  end
+  table.sort(removed, function(a, b) return a.nodeId < b.nodeId end)
+  build.buildFlag = true
+  M.advanceFrame()
+  M.get_main_output()
+  local remaining = 0
+  for _ in pairs(left) do remaining = remaining + 1 end
+  return { removed = removed, remaining = remaining, before = before, after = treeChangeStats() }
 end
 
 return M

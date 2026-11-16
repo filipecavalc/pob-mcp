@@ -48,6 +48,7 @@ import { handleRankGemsByDps, handleListSkillSets, handleSelectSkillSet, handleC
 import { handleListCalcBreakdowns, handleGetCalcBreakdown } from "../handlers/calcBreakdownHandlers.js";
 import { handleGetParty, handlePartyImport, handlePartyClear, handlePartyDisableEffects, handlePartyRebuild, handleSetPartyExportSupport } from "../handlers/partyHandlers.js";
 import { handleListBuildFolder, handleCreateBuildFolder, handleRenameBuild, handleMoveBuild, handleCopyBuild, handleDeleteBuild, withOpenBuilds } from "../handlers/buildFolderHandlers.js";
+import { handleGetNodePower, handleFindTimelessJewel, handleListTattoos, handleApplyTattoo, handleRemoveTattoos, type GetNodePowerArgs, type FindTimelessJewelArgs } from "../handlers/treePowerHandlers.js";
 
 export interface ToolRouterDependencies {
   contextBuilder: ContextBuilder;
@@ -1027,6 +1028,22 @@ export async function routeToolCall(
 
     case "delete_build":
       return await handleDeleteBuild(withOpenBuilds(handlerContext, deps.getLuaClient), { path: args?.path as string, confirm: args?.confirm === true });
+
+    // Tree tab: node power report, timeless jewel finder, tattoos.
+    case "get_node_power":
+      return await handleGetNodePower(luaContext, (args ?? {}) as GetNodePowerArgs);
+
+    case "find_timeless_jewel":
+      return await handleFindTimelessJewel(luaContext, (args ?? {}) as FindTimelessJewelArgs);
+
+    case "list_tattoos":
+      return await handleListTattoos(luaContext, (args ?? {}) as { node_id: number; include_legacy?: boolean });
+
+    case "apply_tattoo":
+      return await handleApplyTattoo(luaContext, (args ?? {}) as { node_id: number; tattoo: string; include_legacy?: boolean });
+
+    case "remove_tattoos":
+      return await handleRemoveTattoos(luaContext, (args ?? {}) as { node_id?: number; all?: boolean; confirm?: boolean });
 
     default:
       throw new Error(`Unknown tool: ${name}`);

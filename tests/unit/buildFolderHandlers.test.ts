@@ -296,6 +296,40 @@ describe('build folder tools: review fixes', () => {
     });
   });
 
+  it("neither lists nor acts on hidden entries: the server's own storage and PoB's ~~temp~~ files", async () => {
+    await fs.mkdir(path.join(builds, '.pob-mcp', 'snapshots'), { recursive: true });
+    await fs.writeFile(path.join(builds, '.pob-mcp', 'snapshots', 'snap.xml'), buildXml(84, 'Marauder', 'Chieftain'));
+    await fs.mkdir(path.join(builds, '.pob-mcp-presets'));
+    await fs.writeFile(path.join(builds, '~~temp~~.xml'), buildXml(84, 'Marauder', 'Chieftain'));
+    await fs.mkdir(path.join(builds, 'Leagues', '.hidden'));
+    await fs.writeFile(path.join(builds, 'Leagues', '.hidden', 'Inner.xml'), buildXml(1, 'Witch', 'None'));
+
+    const listed = textOf(await handleListBuildFolder(ctx(), { filter: 'class:' }));
+    expect(listed).not.toMatch(/pob-mcp|~~temp~~|snap|\.hidden|Inner/);
+    expect(listed).toContain('RF atual');
+    expect((await scanFolder(builds)).map((e) => e.relPath)).not.toEqual(expect.arrayContaining([expect.stringMatching(/^\.|\/\.|~~temp~~/)]));
+    expect(textOf(await handleDeleteBuild(ctx(), { path: 'Leagues/' }))).toContain('(2 builds,');
+
+    const hidden = /is hidden/;
+    await expect(handleListBuildFolder(ctx(), { path: '.pob-mcp' })).rejects.toThrow(hidden);
+    await expect(handleDeleteBuild(ctx(), { path: '.pob-mcp/', confirm: true })).rejects.toThrow(hidden);
+    await expect(handleDeleteBuild(ctx(), { path: '~~temp~~', confirm: true })).rejects.toThrow(hidden);
+    await expect(handleRenameBuild(ctx(), { path: '.pob-mcp-presets/', newName: 'Presets' })).rejects.toThrow(hidden);
+    await expect(handleCopyBuild(ctx(), { path: '.pob-mcp/snapshots/snap.xml', toFolder: '' })).rejects.toThrow(hidden);
+    await expect(handleMoveBuild(ctx(), { path: 'Leagues/.hidden/Inner.xml', toFolder: '' })).rejects.toThrow(hidden);
+    // ...nor as destinations.
+    await expect(handleMoveBuild(ctx(), { path: 'RF atual', toFolder: '.pob-mcp' })).rejects.toThrow(hidden);
+    await expect(handleCopyBuild(ctx(), { path: 'RF atual', toFolder: '.pob-mcp/snapshots' })).rejects.toThrow(hidden);
+    await expect(handleCopyBuild(ctx(), { path: 'RF atual', newName: '.RF' })).rejects.toThrow(hidden);
+    await expect(handleRenameBuild(ctx(), { path: 'RF atual', newName: '~~temp~~' })).rejects.toThrow(hidden);
+    await expect(handleCreateBuildFolder(ctx(), { name: '.pob-mcp-presets2' })).rejects.toThrow(hidden);
+    await expect(handleCreateBuildFolder(ctx(), { name: 'x', path: '.pob-mcp' })).rejects.toThrow(hidden);
+    expect(await exists('RF atual.xml')).toBe(true);
+    expect(await exists('.pob-mcp/snapshots/snap.xml')).toBe(true);
+    expect(await exists('~~temp~~.xml')).toBe(true);
+    expect(await exists('.pob-mcp-presets2')).toBe(false);
+  });
+
   it('refuses to act on a link, even one pointing inside the builds directory', async () => {
     try {
       await fs.symlink(path.join(builds, 'Leagues'), path.join(builds, 'Shortcut'), 'junction');

@@ -23,7 +23,8 @@ import { PoBGuiApiClient } from "../pobGuiClient.js";
  * - links are refused (the listing skips them, as they are not folders);
  * - the build loaded in the engine, or open in the window, cannot be
  *   renamed, moved or deleted: PoB's build list is only reachable with no
- *   build open, and a later save would write to the old name.
+ *   build open, and a later save would write to the old name;
+ * - hidden entries are neither listed nor acted on (see isHiddenEntryName).
  */
 
 export interface BuildFolderContext {
@@ -92,6 +93,14 @@ const FORBIDDEN_NAME = /[\\/:*?"<>|\x00-\x1f\x7f]/;
 // Names Windows reserves for devices, with or without an extension.
 const RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 
+/**
+ * Entries list_builds skips (BuildService.listBuilds): dot-prefixed names,
+ * which include this server's own storage (.pob-mcp/ for snapshots and
+ * exports, .pob-mcp-presets/ for config presets), and PoB's ~~temp~~ files.
+ * The folder tools do not list them and refuse them as targets or destinations.
+ */
+export const isHiddenEntryName = (name: string) => name.startsWith('.') || name.startsWith('~~temp~~');
+
 /** A file or folder name for the builds directory, checked as PoB's dialogs check it, plus Windows' rules. */
 export function validateEntryName(name: unknown, what: string): string {
   if (typeof name !== 'string' || !/\S/.test(name)) throw new Error(`${what} must be a non-empty name`);
@@ -127,6 +136,10 @@ export async function resolveInBuilds(relPath: string | undefined, baseDir: stri
     return { rel, full: path.resolve(baseDir) };
   }
   const full = sanitizeBuildName(rel, baseDir);
+  const hidden = path.relative(path.resolve(baseDir), full).split(path.sep).find(isHiddenEntryName);
+  if (hidden !== undefined) {
+    throw new Error(`"${hidden}" is hidden (a name starting with "." or "~~temp~~"); the build folder tools, like list_builds, do not act on hidden entries`);
+  }
   let probe = path.resolve(baseDir);
   for (const part of rel.split('/')) {
     probe = path.join(probe, part);
@@ -184,7 +197,7 @@ export async function scanFolder(baseDir: string, subPath = ''): Promise<BuildLi
     const dir = path.join(baseDir, currentSubPath);
     const entries = await fs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
-      if (!entry.isFile() || !/\.xml$/i.test(entry.name)) continue;
+      if (isHiddenEntryName(entry.name) || !entry.isFile() || !/\.xml$/i.test(entry.name)) continue;
       const full = path.join(dir, entry.name);
       const stat = await fs.stat(full);
       list.push({
@@ -197,7 +210,7 @@ export async function scanFolder(baseDir: string, subPath = ''): Promise<BuildLi
       });
     }
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
+      if (isHiddenEntryName(entry.name) || !entry.isDirectory()) continue;
       const stat = await fs.stat(path.join(dir, entry.name));
       list.push({ relPath: currentSubPath + entry.name, subPath: currentSubPath, folderName: entry.name, modified: stat.mtimeMs });
       await scanDir(`${currentSubPath}${entry.name}/`);
@@ -370,6 +383,7 @@ async function buildFilesIn(entry: ResolvedEntry): Promise<string[]> {
   const found: string[] = [];
   const walk = async (rel: string, full: string) => {
     for (const child of await fs.readdir(full, { withFileTypes: true })) {
+      if (isHiddenEntryName(child.name)) continue;
       if (child.isDirectory()) await walk(`${rel}/${child.name}`, path.join(full, child.name));
       else if (/\.xml$/i.test(child.name)) found.push(`${rel}/${child.name}`);
     }

@@ -230,7 +230,48 @@ local function flush(c)
   return false
 end
 
+-- Whether someone is using the window: a key, click or wheel event, or the
+-- cursor moving inside the window's area, within the last two seconds.
+-- SimpleGraphic's own hover test (cursorInWindow) is not exposed to Lua, and
+-- a cursor resting inside the area may be over another window covering PoB,
+-- so only movement counts. Used only to decide whether Poll may wait.
+local IDLE_AFTER_MS = 2000
+local IDLE_WAIT_S = 0.25
+function Server:UserActive()
+  local main = self.main
+  local now = GetTime()
+  if main.inputEvents and main.inputEvents[1] then self.lastInput = now end
+  local x, y = GetCursorPos()
+  local w, h = main.screenW, main.screenH
+  local inside = x and y and w and h and x >= 0 and y >= 0 and x < w and y < h
+  if inside and (x ~= self.lastCursorX or y ~= self.lastCursorY) then self.lastInput = now end
+  self.lastCursorX, self.lastCursorY = x, y
+  return now - (self.lastInput or 0) < IDLE_AFTER_MS
+end
+
+-- PoB runs its own long jobs (item database load, power builder, trade query
+-- generator) as coroutines at full frame rate; waiting would slow them down.
+function Server:OtherWorkRunning()
+  for co in pairs(coroutine._list()) do
+    if co ~= self.keepAlive and coroutine.status(co) == "suspended" then return true end
+  end
+  for _, c in ipairs(self.clients) do
+    if c.out ~= "" then return true end -- a reply still being sent
+  end
+  return false
+end
+
 function Server:Poll()
+  -- The keep-alive coroutine makes SimpleGraphic run frames even when the
+  -- window is unfocused or minimised (it otherwise skips OnFrame then: see
+  -- ui_main.cpp, Frame). With nobody using the window and nothing else to
+  -- do, wait for a request instead of spinning: select wakes at once when
+  -- one arrives.
+  if not self:UserActive() and not self:OtherWorkRunning() then
+    local watch = { self.listener }
+    for _, c in ipairs(self.clients) do watch[#watch + 1] = c.sock end
+    socket.select(watch, nil, IDLE_WAIT_S)
+  end
   while true do
     local client = self.listener:accept()
     if not client then break end
@@ -327,6 +368,13 @@ function M.start(main)
   f:close()
   ConPrintf("MCP server: listening on 127.0.0.1:%d (token in %s)", port, tokenPath)
   server.listener, server.port, server.handlers, server.token = listener, port, handlers, token
+
+  -- SimpleGraphic runs OnFrame for an unfocused or minimised window only while
+  -- a coroutine is suspended (it scans coroutine._list(), Common.lua, after
+  -- every call). Keep one suspended for the server's lifetime; nothing else
+  -- resumes it, and Poll throttles itself while the window is idle.
+  server.keepAlive = coroutine.create(function() while true do coroutine.yield() end end)
+  coroutine.resume(server.keepAlive)
   return server
 end
 

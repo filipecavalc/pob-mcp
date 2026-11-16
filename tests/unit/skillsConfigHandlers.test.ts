@@ -252,5 +252,8 @@ describe('registration', () => {
       if (READS.has(action)) expect(modifies).not.toMatch(new RegExp(`\\b${action} = true`));
       else expect(modifies).toMatch(new RegExp(`\\b${action} = true`));
     }
+    // A custom mod search opens the Add Mod popup, so it is refused while the user has a dialog open.
+    const opensPopups = server.match(/local OPENS_POPUPS = \{([\s\S]*?)\n\}/)?.[1] ?? '';
+    expect(opensPopups).toMatch(/\bget_custom_mods = function\(params\) return params\.search ~= nil end/);
   });
 });

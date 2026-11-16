@@ -46,12 +46,16 @@ local MODIFIES_BUILD = {
   apply_tattoo = true, remove_tattoos = true,
   item_set_manage = true,
 }
--- Actions that open the Items tab's own popups for the length of the call
--- (crafting, item sets); never stacked on a dialog the user has open.
+-- Actions that open PoB's own popups for the length of the call (Items tab
+-- crafting, item sets, the Config tab's Add Mod list); never stacked on a
+-- dialog the user has open. A function decides from the params.
 local OPENS_POPUPS = {
   item_craft_create = true, item_craft_affixes = true, item_craft_properties = true, item_add_modifier = true,
   item_add_implicit = true, item_corrupt = true, item_enchant = true, item_set_manage = true,
   items_tab_show_item = true,
+  -- Only its search opens the Add Mod popup; the plain read (get_config uses
+  -- it, and ignores a failure) keeps working while a dialog is open.
+  get_custom_mods = function(params) return params.search ~= nil end,
 }
 -- Compare tab: copying a tree, item or config from a compared build changes the
 -- open build. The other compare_* actions change only the Compare tab's list.
@@ -125,27 +129,30 @@ local function openBuild(main)
   return main.modes["BUILD"]
 end
 
--- Which tabs hold unsaved changes (Build.lua computes `unsaved` from these flags).
-local function unsavedFlags(build)
-  local flags = {}
-  if build.modFlag then flags[#flags + 1] = "build" end
-  for _, tab in ipairs({ "notesTab", "partyTab", "configTab", "treeTab", "skillsTab", "itemsTab", "calcsTab" }) do
-    if build[tab] and build[tab].modFlag then flags[#flags + 1] = tab end
-  end
-  if build.treeTab and build.treeTab.searchFlag then flags[#flags + 1] = "treeTab.search" end
-  if build.spec and build.spec.modFlag then flags[#flags + 1] = "spec" end
-  return flags
-end
+-- The tabs with their own unsaved flag (Build.lua computes `unsaved` from these).
+local FLAGGED_TABS = { "notesTab", "partyTab", "configTab", "treeTab", "skillsTab", "itemsTab", "calcsTab" }
 
 -- The tabs whose own unsaved flag is set: { tabName = true }.
 local function tabFlags(build)
   local set = {}
-  for _, tab in ipairs({ "notesTab", "partyTab", "configTab", "treeTab", "skillsTab", "itemsTab", "calcsTab" }) do
+  for _, tab in ipairs(FLAGGED_TABS) do
     if build[tab] and build[tab].modFlag then set[tab] = true end
   end
-  -- The active spec has its own flag (Build.lua computes `unsaved` from it too).
-  if build.spec and build.spec.modFlag then set.spec = true end
   return set
+end
+
+-- Which tabs hold unsaved changes (Build.lua computes `unsaved` from these flags).
+local function unsavedFlags(build)
+  local flags = {}
+  if build.modFlag then flags[#flags + 1] = "build" end
+  local set = tabFlags(build)
+  for _, tab in ipairs(FLAGGED_TABS) do
+    if set[tab] then flags[#flags + 1] = tab end
+  end
+  if build.treeTab and build.treeTab.searchFlag then flags[#flags + 1] = "treeTab.search" end
+  -- The active spec has its own flag (Build.lua computes `unsaved` from it too).
+  if build.spec and build.spec.modFlag then flags[#flags + 1] = "spec" end
+  return flags
 end
 
 local function guiStatus(main)
@@ -197,7 +204,9 @@ function Server:Handle(request)
   local action, params = request.action, request.params or {}
   local build = openBuild(main)
 
-  if (REPLACES_BUILD[action] or MODIFIES_BUILD[action] or OPENS_DIALOG[action] or OPENS_POPUPS[action]) and main.popups[1] then
+  local opensPopup = OPENS_POPUPS[action]
+  if type(opensPopup) == "function" then opensPopup = opensPopup(params) end
+  if (REPLACES_BUILD[action] or MODIFIES_BUILD[action] or OPENS_DIALOG[action] or opensPopup) and main.popups[1] then
     return { ok = false, error = "a dialog is open in Path of Building; finish or close it first" }
   end
   if REPLACES_BUILD[action] and build and params.force ~= true then
@@ -292,6 +301,10 @@ function Server:Handle(request)
   if not handler then return { ok = false, error = "unknown action: " .. tostring(action) } end
   local popupsBefore = #main.popups
   local tabFlagsBefore = build and tabFlags(build) or {}
+  -- The spec flag belongs to whichever spec is active; a command may switch it
+  -- (select_spec, compare_copy of a tree), so remember which one was.
+  local specBefore = build and build.spec
+  local specFlagBefore = specBefore and specBefore.modFlag
   local res = handler(params)
   -- TradeQueryGenerator opens a "Please Wait" popup that only its normal finish
   -- closes; drop any popup a command left behind so the window stays usable.
@@ -312,6 +325,12 @@ function Server:Handle(request)
         build[tab].modFlag = false
         build.modFlag = true
       end
+    end
+    -- Only while the same spec is still active and its flag was clear before:
+    -- a newly active spec's flag may be one the user raised earlier.
+    if specBefore and build.spec == specBefore and not specFlagBefore and specBefore.modFlag then
+      specBefore.modFlag = false
+      build.modFlag = true
     end
   end
   return res

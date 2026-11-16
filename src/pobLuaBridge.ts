@@ -7,6 +7,7 @@ import fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { atomicWriteFile } from "./utils/atomicWrite.js";
 import { resolvePoBLayout } from "./utils/pobLayout.js";
+import type { CompareList, CompareImportResult, CompareSelectParams, CompareSelectResult, CompareReport, CompareReportParams, ComparePowerParams, ComparePowerReport, CompareBuySimilarParams, CompareBuySimilarResult, CompareCopyParams, CompareCopyResult } from "./types/compareTypes.js";
 
 /** Lua bridge request envelope */
 // params is only ever serialised, so an interface with declared keys is as valid
@@ -998,5 +999,46 @@ async setTree(params: {
     } catch (e) { noteIgnoredError('graceful quit handshake (hard kill follows)', e); }
     this.proc.kill();
     this.proc = null;
+  }
+
+  // Compare tab (PoB's Classes/CompareTab.lua): comparison builds held by the
+  // loaded build's compareTab. They do not change the loaded build, except
+  // compareCopy, which copies into it like the tab's copy buttons.
+  private async compareAction<T>(action: string, params: object = {}): Promise<T> {
+    const res = await this.send({ action, params });
+    if (!res.ok) throw new Error(res.error || `${action} failed`);
+    return res.result as T;
+  }
+
+  async compareList(): Promise<CompareList> {
+    return this.compareAction<CompareList>("compare_list");
+  }
+
+  async compareImport(xml: string, label?: string): Promise<CompareImportResult> {
+    return this.compareAction<CompareImportResult>("compare_import", { xml, label });
+  }
+
+  async compareRemove(index: number): Promise<CompareList> {
+    return this.compareAction<CompareList>("compare_remove", { index });
+  }
+
+  async compareSelect(params: CompareSelectParams): Promise<CompareSelectResult> {
+    return this.compareAction<CompareSelectResult>("compare_select", params);
+  }
+
+  async compareReport(params: CompareReportParams): Promise<CompareReport> {
+    return this.compareAction<CompareReport>("compare_report", params);
+  }
+
+  async comparePowerReport(params: ComparePowerParams): Promise<ComparePowerReport> {
+    return this.compareAction<ComparePowerReport>("compare_power_report", params);
+  }
+
+  async compareBuySimilar(params: CompareBuySimilarParams): Promise<CompareBuySimilarResult> {
+    return this.compareAction<CompareBuySimilarResult>("compare_buy_similar", params);
+  }
+
+  async compareCopy(params: CompareCopyParams): Promise<CompareCopyResult> {
+    return this.compareAction<CompareCopyResult>("compare_copy", params);
   }
 }

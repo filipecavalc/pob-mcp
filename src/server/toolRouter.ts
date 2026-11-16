@@ -38,6 +38,7 @@ import { handleSuggestWatchersEye } from "../handlers/jewelAdvisorHandlers.js";
 import { handleSuggestCrafting } from "../handlers/craftingAdvisorHandler.js";
 import { handleFindItemUpgrades as handleFindItemUpgradesNew } from "../handlers/itemShoppingHandler.js";
 import { handleClassifyItemAffixes, handleListCraftableMods, handleFindAffixTiers } from "../handlers/affixHandlers.js";
+import { handleImportBuildLink, handleListArchiveBuilds, handleShareBuild } from "../handlers/buildSourceHandlers.js";
 
 export interface ToolRouterDependencies {
   contextBuilder: ContextBuilder;
@@ -837,6 +838,26 @@ export async function routeToolCall(
         max_item_level: args?.max_item_level === undefined ? undefined : Number(args.max_item_level),
         include_unobtainable: Boolean(args?.include_unobtainable),
         max_results: args?.max_results === undefined ? undefined : Number(args.max_results),
+      });
+
+    case "import_build_link":
+      return await handleImportBuildLink(luaContext, {
+        link: args?.link as string | undefined,
+        name: args?.name as string | undefined,
+        saveAs: args?.save_as as string | undefined,
+        overwrite: args?.overwrite === true,
+      });
+
+    case "list_archive_builds":
+      return await handleListArchiveBuilds(luaContext, {
+        list: args?.list as string | undefined,
+        limit: args?.limit === undefined ? undefined : Number(args.limit),
+      });
+
+    case "share_build":
+      return await handleShareBuild(luaContext, {
+        site: args?.site as string | undefined,
+        confirm: args?.confirm === true,
       });
 
     default:

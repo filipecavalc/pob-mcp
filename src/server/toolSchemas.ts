@@ -1068,6 +1068,43 @@ export function getLuaToolSchemas(): ToolSchema[] {
         required: ["slot"],
       },
     },
+    {
+      name: "import_build_link",
+      description: "Import a build from a link, as Path of Building's Import/Export tab does with 'enter URL or code' and Import to a new build. Accepts links from every site in PoB's own list (Modules/BuildSiteTools.lua: pobb.in, poe.ninja, Maxroll, pob.codes, Pastebin, PastebinP, Rentry, poedb), pob:// links, YouTube/Google redirect links to those, and plain build codes. PoB's code recognises the link and gives the download URL; the code is downloaded and loaded into the engine, and the link is kept as the build's import link. AUTO-RETURNS the same summary as lua_load_build. Optionally saves to save_as (never replaces a file without overwrite).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          link: { type: "string", description: "Build link (e.g. https://pobb.in/abc, https://poe.ninja/poe1/pob/abc, a Link from list_archive_builds) or a build code." },
+          name: { type: "string", description: "Name for the imported build (default 'Imported build', as PoB)." },
+          save_as: { type: "string", description: "Build file to save it to (.xml added if missing). Not saved when omitted." },
+          overwrite: { type: "boolean", description: "Allow replacing an existing save_as file (default: false).", default: false },
+        },
+        required: ["link"],
+      },
+    },
+    {
+      name: "list_archive_builds",
+      description: "List builds from PoB Archives (pobarchives.com), as Path of Building shows them: 'trending' and 'latest' are the build list's tabs; 'similar' is the build screen's Similar Builds, which sends the loaded build's import code to pobarchives.com's recommendations API and returns builds like it with a match score. Each build shows name, author, ascendancy, main skill, tree version, DPS, life, ES, EHP and its Link; import one with import_build_link.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          list: { type: "string", enum: ["trending", "latest", "similar"], description: "Which list (default: trending). similar uses the build loaded in the engine." },
+          limit: { type: "number", description: "Most builds to show (default 20, max 100)." },
+        },
+      },
+    },
+    {
+      name: "share_build",
+      description: "Publish the loaded build to a build site and get its link, as Path of Building's Import/Export 'Share' button (buildSites.UploadBuild). Sites are those PoB shares to (pobb.in, poe.ninja, Maxroll, pob.codes, poedb). Without confirm: true nothing is uploaded; it reports what would be sent. The upload is public to anyone with the link: only confirm when the user asked to share.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          site: { type: "string", description: "Site label or id from PoB's list, e.g. 'pobb.in', 'PoeNinja', 'Maxroll', 'pob.codes', 'poedb.tw'." },
+          confirm: { type: "boolean", description: "Must be true to upload. Default false: preview only.", default: false },
+        },
+        required: ["site"],
+      },
+    },
   ];
 }
 

@@ -7,6 +7,7 @@ import fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { atomicWriteFile } from "./utils/atomicWrite.js";
 import { resolvePoBLayout } from "./utils/pobLayout.js";
+import type { ArchivesParseResult, ArchivesRequest, BuildSite, ResolvedBuildLink } from "./services/buildSiteClient.js";
 
 /** Lua bridge request envelope */
 // params is only ever serialised, so an interface with declared keys is as valid
@@ -998,5 +999,43 @@ async setTree(params: {
     } catch (e) { noteIgnoredError('graceful quit handshake (hard kill follows)', e); }
     this.proc.kill();
     this.proc = null;
+  }
+
+  // Build sites (Modules/BuildSiteTools.lua) and PoB Archives (Classes/PoBArchivesProvider.lua).
+
+  async listBuildSites(): Promise<BuildSite[]> {
+    const res = await this.send({ action: "list_build_sites" });
+    if (!res.ok) throw new Error(res.error || "list_build_sites failed");
+    return ((res.result as { sites?: BuildSite[] } | undefined)?.sites) ?? [];
+  }
+
+  /** Runs PoB's ImportBuild / protocol handler on the input with its download intercepted. */
+  async resolveBuildLink(link: string): Promise<ResolvedBuildLink> {
+    const res = await this.send({ action: "resolve_build_link", params: { link } });
+    if (!res.ok) throw new Error(res.error || "resolve_build_link failed");
+    return res.result as ResolvedBuildLink;
+  }
+
+  async archivesRequest(mode: 'builds' | 'similar', list?: string): Promise<ArchivesRequest> {
+    const res = await this.send({ action: "archives_request", params: { mode, list } });
+    if (!res.ok) throw new Error(res.error || "archives_request failed");
+    return res.result as ArchivesRequest;
+  }
+
+  async archivesParse(mode: 'builds' | 'similar', body: string): Promise<ArchivesParseResult> {
+    const res = await this.send({ action: "archives_parse", params: { mode, body } });
+    if (!res.ok) throw new Error(res.error || "archives_parse failed");
+    const result = res.result as Partial<ArchivesParseResult> | undefined;
+    // An empty Lua table serialises as {} rather than [].
+    return { builds: Array.isArray(result?.builds) ? result.builds : [], statusMsg: result?.statusMsg };
+  }
+
+  /** Loads a downloaded build as loadBuildXml does, and records the link it came from (build.importLink). */
+  async loadImportedBuild(xml: string, name: string, importLink?: string): Promise<BuildLoadResult> {
+    this.loadedFilePath = undefined;
+    this.buildGeneration++;
+    const res = await this.send({ action: "load_imported_build", params: { xml, name, importLink } });
+    if (!res.ok) throw new Error(res.error || "load_imported_build failed");
+    return { ok: true };
   }
 }

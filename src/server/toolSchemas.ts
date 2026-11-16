@@ -1098,7 +1098,7 @@ export function getLuaToolSchemas(): ToolSchema[] {
     },
     {
       name: "select_skill_set",
-      description: "Switch the active skill set, as double-clicking it in PoB's Manage Skill Sets. Stats are recalculated.",
+      description: "Switch the active skill set, as double-clicking it in PoB's Manage Skill Sets. Stats are recalculated. Selecting the set already active changes nothing.",
       inputSchema: {
         type: "object",
         properties: { id: { type: "number", description: "Skill set id (see list_skill_sets)" } },
@@ -1144,12 +1144,12 @@ export function getLuaToolSchemas(): ToolSchema[] {
     },
     {
       name: "list_config_sets",
-      description: "List the build's config sets (Configuration tab 'Config set' / Manage...), with ids and which one is active. get_config, set_config and the custom modifier tools work on the active set.",
+      description: "List the config sets stored inside the build (Configuration tab 'Config set' / Manage...), with ids and which one is active. get_config, set_config and the custom modifier tools work on the active set. Not the preset files of save_config_preset / list_config_presets.",
       inputSchema: { type: "object", properties: {} },
     },
     {
       name: "select_config_set",
-      description: "Switch the active config set, as double-clicking it in PoB's Manage Config Sets. Stats are recalculated.",
+      description: "Switch the active config set stored inside the build, as double-clicking it in PoB's Manage Config Sets. Stats are recalculated. Selecting the set already active changes nothing. For preset files, use load_config_preset.",
       inputSchema: {
         type: "object",
         properties: { id: { type: "number", description: "Config set id (see list_config_sets)" } },
@@ -1158,7 +1158,7 @@ export function getLuaToolSchemas(): ToolSchema[] {
     },
     {
       name: "create_config_set",
-      description: "Create a config set: one with PoB's default settings (New) or a copy of another (Copy). Like PoB, it does not switch to it unless activate is true.",
+      description: "Create a config set stored inside the build (saved with it): one with PoB's default settings (New) or a copy of another (Copy). Like PoB, it does not switch to it unless activate is true. Unlike save_config_preset, which writes a separate preset file.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1366,7 +1366,7 @@ export function getOptimizationToolSchemas(): ToolSchema[] {
     {
       name: "optimize_skill_links",
       truncatable: true,
-      description: "Analyze skill gem setups for 'more' multipliers, penetration, and support gem synergies. Flags missing multiplicative damage supports and suggests clear-speed vs bossing balance.",
+      description: "Analyze skill gem setups for 'more' multipliers, penetration, and support gem synergies. Flags missing multiplicative damage supports and suggests clear-speed vs bossing balance. These are template estimates, not Path of Building's calculation; rank_gems_by_dps gives PoB's own DPS for every candidate gem.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1469,7 +1469,7 @@ export function getConfigToolSchemas(): ToolSchema[] {
     },
     {
       name: "save_config_preset",
-      description: "Save the current configuration (charges, conditions, enemy settings) as a named preset for quick reuse",
+      description: "Save the current configuration (charges, conditions, enemy settings) as a named preset for quick reuse. Presets are separate files under the builds folder, shared across builds; for config sets stored inside the build (PoB's Config set dropdown), use create_config_set.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1483,7 +1483,7 @@ export function getConfigToolSchemas(): ToolSchema[] {
     },
     {
       name: "load_config_preset",
-      description: "Load a previously saved configuration preset, restoring all charge, condition, and enemy settings at once",
+      description: "Load a previously saved configuration preset, restoring all charge, condition, and enemy settings at once. Presets are separate files (save_config_preset), not the build's own config sets (select_config_set).",
       inputSchema: {
         type: "object",
         properties: {
@@ -1497,7 +1497,7 @@ export function getConfigToolSchemas(): ToolSchema[] {
     },
     {
       name: "list_config_presets",
-      description: "List all saved configuration presets",
+      description: "List all saved configuration presets (separate preset files, not the config sets stored inside the build; see list_config_sets).",
       inputSchema: {
         type: "object",
         properties: {},
@@ -1638,7 +1638,7 @@ export function getSkillGemToolSchemas(): ToolSchema[] {
     {
       name: "find_optimal_links",
       truncatable: true,
-      description: "Auto-generate the best support gem combination for a skill based on budget and optimization goal. Provides step-by-step upgrade path.",
+      description: "Auto-generate the best support gem combination for a skill based on budget and optimization goal. Provides step-by-step upgrade path. These are template estimates, not Path of Building's calculation; rank_gems_by_dps gives PoB's own DPS for every candidate gem.",
       inputSchema: {
         type: "object",
         properties: {

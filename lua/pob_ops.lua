@@ -1776,4 +1776,545 @@ function M.import_character(params)
   }
 end
 
+-- ===========================================================================
+-- Calcs tab breakdowns
+-- ===========================================================================
+-- The Calcs tab (Classes/CalcsTab.lua) lays its cells out from
+-- Modules/CalcSections.lua into CalcSectionControl objects. Each cell
+-- (colData) carries a display format plus a list of "section data" entries,
+-- and hovering it hands that list to CalcBreakdownControl:SetBreakdownData,
+-- which turns each entry into text lines and tables: the breakdown tables
+-- Calcs wrote into actor.breakdown (AddBreakdownSection) and the modifier
+-- tables tabulated from the mod store (AddModSection). The functions below
+-- walk the same cells and run those two PoB methods, so every row comes from
+-- PoB itself; only the drawing is left out.
+
+-- The Calcs tab's actor: the minion when its "Show Minion Stats" box is set
+-- (CalcBreakdownControl:AddBreakdownSection picks it the same way).
+local function calcsActor(calcsTab)
+  local env = calcsTab.calcsEnv
+  if not env then return nil end
+  return calcsTab.input.showMinion and env.minion or env.player
+end
+
+local function calcText(value)
+  if value == nil then return nil end
+  return (stripColourCodes(tostring(value)):gsub('^%s+', ''):gsub('%s+$', ''))
+end
+
+-- A subsection whose first row has no label is a column header row
+-- (HitDamage's "Physical:", "Lightning:", ...; Maximum Hit Taken's types).
+local function columnHeaders(subSec)
+  local first = subSec.data and subSec.data[1]
+  if not first or first.label then return nil end
+  local headers = {}
+  for i, cell in ipairs(first) do
+    headers[i] = cell.format and (calcText(cell.format):gsub(':$', '')) or nil
+  end
+  return headers
+end
+
+-- buffModeDropList in CalcsTab.lua: the tab's "Calculation Mode".
+local CALC_MODES = { UNBUFFED = true, BUFFED = true, COMBAT = true, EFFECTIVE = true }
+
+-- Run fn with the Calcs tab showing the player or the minion (its "Show
+-- Minion Stats" checkbox) in the given calculation mode (its "Calculation
+-- Mode" dropdown), and put both back afterwards. Both are saved with the
+-- build, so a read must not leave them changed.
+local function withCalcsView(params, fn)
+  local calcsTab = build.calcsTab
+  local mode = params.mode and tostring(params.mode):upper() or nil
+  if mode and not CALC_MODES[mode] then
+    return nil, 'unknown calculation mode "' .. tostring(params.mode) .. '"; use UNBUFFED, BUFFED, COMBAT or EFFECTIVE'
+  end
+  local previousMinion, previousMode = calcsTab.input.showMinion, calcsTab.input.misc_buffMode
+  local modeChanged = mode ~= nil and mode ~= previousMode
+  if modeChanged then
+    calcsTab.input.misc_buffMode = mode
+    calcsTab:BuildOutput()
+  end
+  calcsTab.input.showMinion = params.minion == true or nil
+  local ok, a, b = pcall(function()
+    if params.minion == true and not (calcsTab.calcsEnv and calcsTab.calcsEnv.minion) then
+      error("the Calcs tab's skill has no minion, so there are no minion stats to show", 0)
+    end
+    return fn()
+  end)
+  calcsTab.input.showMinion = previousMinion
+  if modeChanged then
+    calcsTab.input.misc_buffMode = previousMode
+    calcsTab:BuildOutput()
+  end
+  if not ok then return nil, tostring(a) end
+  return a, b
+end
+
+-- What the Calcs tab is showing: its mode, actor and the skill it details.
+local function calcsViewInfo(calcsTab)
+  local env = calcsTab.calcsEnv
+  local skill = env and env.player and env.player.mainSkill
+  local effect = skill and skill.activeEffect
+  return {
+    mode = calcsTab.input.misc_buffMode,
+    actor = calcsTab.input.showMinion and 'minion' or 'player',
+    haveMinion = env and env.minion ~= nil or false,
+    skill = effect and effect.grantedEffect and effect.grantedEffect.name or nil,
+  }
+end
+
+-- Every labelled cell of the Calcs tab, in the tab's order, with its
+-- address, labels, the value it displays and whether the tab shows it for
+-- this build (CalcSectionControl:UpdateSize's CheckFlag tests).
+local function collectCalcCells(calcsTab, actor)
+  local cells = {}
+  for _, section in ipairs(calcsTab.sectionList or {}) do
+    local sectionShown = calcsTab:CheckFlag(section)
+    for subIndex, subSec in ipairs(section.subSection or {}) do
+      local headers = columnHeaders(subSec)
+      for rowIndex, rowData in ipairs(subSec.data or {}) do
+        if rowData.label then
+          local rowShown = sectionShown and calcsTab:CheckFlag(rowData)
+          for colIndex, colData in ipairs(rowData) do
+            if colData.format then
+              local breakdowns = {}
+              for _, sectionData in ipairs(colData) do
+                if sectionData.breakdown then breakdowns[#breakdowns + 1] = sectionData.breakdown end
+              end
+              local shown = rowShown and calcsTab:CheckFlag(colData) or false
+              local valueOk, value = pcall(formatCalcStr, colData.format, actor, colData)
+              cells[#cells + 1] = {
+                id = section.id .. '/' .. subIndex .. '/' .. rowIndex .. '/' .. colIndex,
+                section = section.id,
+                subsection = calcText(subSec.label),
+                row = calcText(rowData.label),
+                column = headers and headers[colIndex] or nil,
+                value = shown and valueOk and calcText(value) or nil,
+                outputKey = colData.format:match('{%d*:?output:([%a%.]+)}'),
+                breakdowns = breakdowns,
+                hasBreakdown = #colData > 0,
+                shown = shown,
+                colData = colData,
+              }
+            end
+          end
+        end
+      end
+    end
+  end
+  return cells
+end
+
+local function normaliseStatName(text)
+  return (tostring(text or ''):lower():gsub('[^%w]', ''))
+end
+
+-- The names a caller may use for a cell, strongest first: its id; the
+-- output key it displays; the breakdown keys it shows (a "Base from
+-- Armours" cell shows the Armour breakdown too, but displays another
+-- number); then its labels.
+local function cellNames(cell)
+  local tiers = { { cell.id }, {}, {}, {} }
+  if cell.outputKey then
+    table.insert(tiers[2], cell.outputKey)
+    table.insert(tiers[2], (cell.outputKey:gsub('^%a+%.', '')))
+  end
+  for _, name in ipairs(cell.breakdowns) do
+    table.insert(tiers[3], name)
+    table.insert(tiers[3], (name:gsub('^%a+%.', '')))
+  end
+  local labels = tiers[4]
+  local row, col, sub = cell.row or '', cell.column, cell.subsection or ''
+  if col then
+    table.insert(labels, row .. ' ' .. col)
+    table.insert(labels, col .. ' ' .. row)
+    table.insert(labels, sub .. ' ' .. row .. ' ' .. col)
+  else
+    table.insert(labels, row)
+    table.insert(labels, sub .. ' ' .. row)
+    table.insert(labels, cell.section .. ' ' .. row)
+  end
+  return tiers
+end
+
+local function publicCell(cell)
+  return {
+    id = cell.id, section = cell.section, subsection = cell.subsection, row = cell.row,
+    column = cell.column, value = cell.value, outputKey = cell.outputKey,
+    breakdowns = cell.breakdowns, hasBreakdown = cell.hasBreakdown, shown = cell.shown,
+  }
+end
+
+-- Every word of the filter must appear in one of the cell's names, as the
+-- Calcs tab's search box matches labels ("max hit" finds Maximum Hit Taken).
+local function cellMatchesFilter(cell, filter)
+  local terms = {}
+  for term in tostring(filter):gmatch('%S+') do
+    local t = normaliseStatName(term)
+    if t ~= '' then terms[#terms + 1] = t end
+  end
+  if #terms == 0 then return true end
+  for _, tier in ipairs(cellNames(cell)) do
+    for _, name in ipairs(tier) do
+      local n = normaliseStatName(name)
+      local all = true
+      for _, t in ipairs(terms) do
+        if not n:find(t, 1, true) then all = false break end
+      end
+      if all then return true end
+    end
+  end
+  return false
+end
+
+-- params: { filter?: string, minion?: boolean, mode?: string, includeHidden?: boolean }
+function M.list_calc_breakdowns(params)
+  params = params or {}
+  local _, err = M.get_main_output()
+  if err then return nil, err end
+  return withCalcsView(params, function()
+    local calcsTab = build.calcsTab
+    local actor = calcsActor(calcsTab)
+    if not actor then error('the Calcs tab has no calculation environment (no minion to show?)') end
+    local filter = type(params.filter) == 'string' and params.filter or ''
+    local list = {}
+    for _, cell in ipairs(collectCalcCells(calcsTab, actor)) do
+      if (cell.shown or params.includeHidden == true) and cellMatchesFilter(cell, filter) then
+        list[#list + 1] = publicCell(cell)
+      end
+    end
+    local result = calcsViewInfo(calcsTab)
+    result.cells = list
+    return result
+  end)
+end
+
+-- CalcBreakdownControl's section list as plain data: text lines, tables
+-- with the columns PoB draws (those with a value in some row, as
+-- SetBreakdownData sizes them), and the radius of an area breakdown.
+local function breakdownSectionsToData(sectionList)
+  local out = {}
+  for _, section in ipairs(sectionList) do
+    if section.type == 'TEXT' then
+      local lines = {}
+      for _, line in ipairs(section.lines or {}) do lines[#lines + 1] = calcText(line) end
+      out[#out + 1] = { type = 'text', lines = lines }
+    elseif section.type == 'TABLE' then
+      local columns, keys = {}, {}
+      for _, col in ipairs(section.colList or {}) do
+        for _, row in ipairs(section.rowList or {}) do
+          if row[col.key] ~= nil then
+            columns[#columns + 1] = calcText(col.label)
+            keys[#keys + 1] = col.key
+            break
+          end
+        end
+      end
+      local rows = {}
+      for _, row in ipairs(section.rowList or {}) do
+        local cells = {}
+        for i, key in ipairs(keys) do cells[i] = row[key] ~= nil and calcText(row[key]) or '' end
+        rows[#rows + 1] = cells
+      end
+      out[#out + 1] = { type = 'table', label = calcText(section.label), footer = calcText(section.footer), columns = columns, rows = rows }
+    elseif section.type == 'RADIUS' then
+      out[#out + 1] = { type = 'radius', radius = section.radius }
+    end
+  end
+  return out
+end
+
+-- params: { stat: string, section?: string, minion?: boolean, mode?: string }
+function M.get_calc_breakdown(params)
+  params = params or {}
+  if type(params.stat) ~= 'string' or params.stat == '' then return nil, 'stat is required' end
+  local _, err = M.get_main_output()
+  if err then return nil, err end
+  local BreakdownClass = common and common.classes and common.classes.CalcBreakdownControl
+  if not BreakdownClass then return nil, 'CalcBreakdownControl is not loaded' end
+  return withCalcsView(params, function()
+    local calcsTab = build.calcsTab
+    local actor = calcsActor(calcsTab)
+    if not actor then error('the Calcs tab has no calculation environment (no minion to show?)') end
+    local cells = collectCalcCells(calcsTab, actor)
+    local wanted = normaliseStatName(params.stat)
+    local sectionFilter = params.section and normaliseStatName(params.section) or nil
+
+    -- The strongest tier wins; within it, cells the tab shows for this build
+    -- beat hidden ones, which have nothing to break down.
+    local matches
+    for tier = 1, 4 do
+      local found = {}
+      for _, cell in ipairs(cells) do
+        local inSection = not sectionFilter or normaliseStatName(cell.section) == sectionFilter
+          or normaliseStatName(cell.subsection) == sectionFilter
+        if inSection then
+          for _, name in ipairs(cellNames(cell)[tier]) do
+            if normaliseStatName(name) == wanted then found[#found + 1] = cell break end
+          end
+        end
+      end
+      if #found > 0 then matches = found break end
+    end
+    if not matches then
+      local close = {}
+      for _, cell in ipairs(cells) do
+        if cell.shown and #close < 15 and wanted ~= '' and cellMatchesFilter(cell, params.stat) then
+          close[#close + 1] = publicCell(cell)
+        end
+      end
+      return { found = false, candidates = close }
+    end
+    local shown = {}
+    for _, cell in ipairs(matches) do if cell.shown then shown[#shown + 1] = cell end end
+    local pool = #shown > 0 and shown or matches
+    -- CalcSections repeats a row under exclusive flags (Skill DPS for
+    -- triggered and other skills); hidden copies of one stat are one answer.
+    if #shown == 0 and #pool > 1 then
+      local key = function(cell) return tostring(cell.outputKey) .. '|' .. table.concat(cell.breakdowns, ',') end
+      local same = true
+      for _, cell in ipairs(pool) do if key(cell) ~= key(pool[1]) then same = false break end end
+      if same then pool = { pool[1] } end
+    end
+    if #pool > 1 then
+      local candidates = {}
+      for i, cell in ipairs(pool) do if i <= 15 then candidates[i] = publicCell(cell) end end
+      return { found = false, ambiguous = true, candidates = candidates }
+    end
+    local cell = pool[1]
+    local result = publicCell(cell)
+    for k, v in pairs(calcsViewInfo(calcsTab)) do result[k] = v end
+    result.found = true
+    result.sections = {}
+    if not cell.shown then return result end
+    -- CalcBreakdownControl:SetBreakdownData without the layout: the same
+    -- CheckFlag filter, then AddBreakdownSection or AddModSection for each
+    -- entry, run on a stand-in object so the tab's own pane is left alone.
+    local proxy = setmetatable({ calcsTab = calcsTab, sectionList = {} }, { __index = BreakdownClass })
+    for _, sectionData in ipairs(cell.colData) do
+      if calcsTab:CheckFlag(sectionData) then
+        if sectionData.breakdown then
+          BreakdownClass.AddBreakdownSection(proxy, sectionData)
+        elseif sectionData.modName then
+          BreakdownClass.AddModSection(proxy, sectionData)
+        end
+      end
+    end
+    result.sections = breakdownSectionsToData(proxy.sectionList)
+    return result
+  end)
+end
+
+-- ===========================================================================
+-- Party tab
+-- ===========================================================================
+-- Classes/PartyTab.lua keeps its import, append, clear, "Disable Party
+-- Effects" and "Rebuild All" logic in closures behind its controls. These
+-- operations set the controls as a user does (destination dropdown, Append
+-- checkbox) and press the same buttons, so PoB's own code parses the
+-- exported buffs into partyTab.actor, which CalcPerform reads as
+-- env.partyMembers.
+
+-- partyDestinations in PartyTab.lua.
+local PARTY_DESTINATIONS = { 'All', 'Party Member Stats', 'Aura', 'Curse', 'Warcry Skills', 'Link Skills', 'EnemyConditions', 'EnemyMods' }
+
+local function partyTabOrError()
+  if not build or not build.partyTab or not build.partyTab.controls then return nil, 'party tab not initialized' end
+  return build.partyTab
+end
+
+local function selectPartyDestination(partyTab, destination)
+  destination = destination or 'All'
+  for _, name in ipairs(PARTY_DESTINATIONS) do
+    if name:lower() == tostring(destination):lower() then
+      partyTab.controls.importCodeDestination:SelByValue(name)
+      return name
+    end
+  end
+  return nil, 'unknown destination "' .. tostring(destination) .. '"; use one of: ' .. table.concat(PARTY_DESTINATIONS, ', ')
+end
+
+local function recalcAfterPartyChange()
+  build.buildFlag = true
+  M.advanceFrame()
+  M.get_main_output()
+end
+
+-- Entries of one of the party actor's buff lists (PartyTab:ParseBuffs keys
+-- them by name, Vaal skills in a nested "Vaal" list), with their effect.
+local function partyEffectList(list)
+  local out = {}
+  for name, entry in pairs(list or {}) do
+    if type(entry) == 'table' and entry.effectMult == nil and name == 'Vaal' then
+      for vaalName, vaalEntry in pairs(entry) do
+        out[#out + 1] = { name = vaalName, effect = vaalEntry.effectMult, mods = vaalEntry.modList and #vaalEntry.modList or 0 }
+      end
+    elseif type(entry) == 'table' then
+      out[#out + 1] = { name = name, effect = entry.effectMult, mods = entry.modList and #entry.modList or 0, isMark = entry.isMark or nil }
+    end
+  end
+  table.sort(out, function(a, b) return tostring(a.name) < tostring(b.name) end)
+  return out
+end
+
+function M.party_get()
+  local partyTab, err = partyTabOrError()
+  if not partyTab then return nil, err end
+  local c = partyTab.controls
+  local actor = partyTab.actor or {}
+  local aura, curse, warcry, link = actor.Aura or {}, actor.Curse or {}, actor.Warcry or {}, actor.Link or {}
+  local stats = {}
+  for k, v in pairs(actor.output or {}) do
+    if type(v) == 'number' then stats[k] = v
+    elseif type(v) == 'table' then
+      for k2, v2 in pairs(v) do if type(v2) == 'number' then stats[k .. '.' .. k2] = v2 end end
+    end
+  end
+  local memberFlags = {}
+  for name in pairs((actor.modDB and actor.modDB.mods) or {}) do memberFlags[#memberFlags + 1] = name end
+  table.sort(memberFlags)
+  local enemyMods = {}
+  for _, mod in ipairs(partyTab.enemyModList or {}) do
+    enemyMods[#enemyMods + 1] = { name = mod.name, type = mod.type, value = type(mod.value) ~= 'table' and mod.value or nil }
+  end
+  local otherEffects = {}
+  for name, entry in pairs(aura.otherEffects or {}) do
+    otherEffects[#otherEffects + 1] = { name = name, effect = entry.effectMult, mods = entry.modList and #entry.modList or 0 }
+  end
+  table.sort(otherEffects, function(a, b) return tostring(a.name) < tostring(b.name) end)
+  local extraAura = aura.extraAura and aura.extraAura.extraAura
+  local function text(control) return control and control.buf or '' end
+  return {
+    destination = c.importCodeDestination.list[c.importCodeDestination.selIndex],
+    append = c.appendNotReplace.state == true,
+    exportSupport = partyTab.enableExportBuffs == true,
+    imported = {
+      partyMemberStats = text(c.editPartyMemberStats),
+      auras = text(c.editAuras),
+      curses = text(c.editCurses),
+      warcries = text(c.editWarcries),
+      links = text(c.editLinks),
+      enemyConditions = text(c.enemyCond),
+      enemyMods = text(c.enemyMods),
+    },
+    active = {
+      auras = partyEffectList(aura.Aura),
+      auraDebuffs = partyEffectList(aura.AuraDebuff),
+      extraAuraMods = extraAura and extraAura.modList and #extraAura.modList or 0,
+      otherEffects = otherEffects,
+      curses = partyEffectList(curse.Curse),
+      curseLimit = curse.limit,
+      warcries = partyEffectList(warcry.Warcry),
+      links = partyEffectList(link.Link),
+      partyMemberStats = stats,
+      partyMemberFlags = memberFlags,
+      enemyMods = enemyMods,
+    },
+  }
+end
+
+-- params: { xml: string, destination?: string, append?: boolean }
+-- PartyTab's Import button once its code box has accepted a code; the XML
+-- is that code decoded (decoding happens in TS, as for lua_import_code,
+-- because the headless engine's Inflate may be a stub).
+function M.party_import(params)
+  local partyTab, err = partyTabOrError()
+  if not partyTab then return nil, err end
+  if type(params) ~= 'table' or type(params.xml) ~= 'string' or params.xml == '' then return nil, 'missing xml' end
+  -- A build file saved on Windows has CRLF, which PoB never sees, as it
+  -- reads files in text mode; ParseBuffs splits lines on LF and would
+  -- keep the CR, filing every buff under a type name ending in it.
+  local xmlText = params.xml:gsub('\r\n', '\n')
+  -- finishImport reports a bad XML through launch:ShowErrMsg, which no
+  -- caller sees; check what it needs first.
+  local dbXML, parseErr = common.xml.ParseXML(xmlText)
+  if not dbXML then return nil, 'the build XML does not parse: ' .. tostring(parseErr) end
+  if not dbXML[1] or dbXML[1].elem ~= 'PathOfBuilding' then return nil, "the build XML has no 'PathOfBuilding' root element" end
+  local exported = {}
+  for _, tabNode in ipairs(dbXML[1]) do
+    if type(tabNode) == 'table' and tabNode.elem == 'Party' then
+      for _, node in ipairs(tabNode) do
+        if type(node) == 'table' and node.elem == 'ExportedBuffs' and node.attrib and node.attrib.name then
+          exported[#exported + 1] = node.attrib.name
+        end
+      end
+      break
+    end
+  end
+  if #exported == 0 then
+    return nil, 'the build carries no party export: it must be saved or exported with "Export Support" enabled '
+      .. '(PoB Import/Export tab, or party_set_export_support here)'
+  end
+  local destination, destErr = selectPartyDestination(partyTab, params.destination)
+  if not destination then return nil, destErr end
+  partyTab.controls.appendNotReplace.state = params.append == true
+  -- The state importCodeHandle leaves for a valid code.
+  partyTab.importCodeSite = nil
+  partyTab.importCodeFetching = nil
+  partyTab.importCodeXML = xmlText
+  partyTab.importCodeValid = true
+  partyTab.importCodeDetail = colorCodes.POSITIVE .. 'Code is valid'
+  partyTab.controls.importCodeGo.onClick()
+  recalcAfterPartyChange()
+  local state = M.party_get()
+  state.exportedSections = exported
+  return state
+end
+
+-- params: { destination?: string } — PartyTab's Clear button.
+function M.party_clear(params)
+  local partyTab, err = partyTabOrError()
+  if not partyTab then return nil, err end
+  local destination, destErr = selectPartyDestination(partyTab, params and params.destination)
+  if not destination then return nil, destErr end
+  partyTab.controls.clear.onClick()
+  recalcAfterPartyChange()
+  return M.party_get()
+end
+
+-- PartyTab's "Disable Party Effects": drops the parsed effects, keeps the text.
+function M.party_disable_effects()
+  local partyTab, err = partyTabOrError()
+  if not partyTab then return nil, err end
+  partyTab.controls.removeEffects.onClick()
+  recalcAfterPartyChange()
+  return M.party_get()
+end
+
+-- PartyTab's "Rebuild All": parses every box again and applies the effects.
+function M.party_rebuild()
+  local partyTab, err = partyTabOrError()
+  if not partyTab then return nil, err end
+  partyTab.controls.rebuild.onClick()
+  recalcAfterPartyChange()
+  return M.party_get()
+end
+
+-- params: { enabled: boolean } — the Import/Export tab's "Export Support"
+-- checkbox (ImportTab.lua). With it on, CalcPerform collects this build's
+-- auras, curses, warcries, links and enemy modifiers, and PartyTab:Save
+-- writes them as ExportedBuffs into the saved or exported build, for
+-- another build's Party tab to import. The returned text is what
+-- PartyTab:exportBuffs will write for each section.
+function M.party_set_export_support(params)
+  local partyTab, err = partyTabOrError()
+  if not partyTab then return nil, err end
+  if type(params) ~= 'table' or type(params.enabled) ~= 'boolean' then return nil, 'enabled must be true or false' end
+  local checkbox = build.importTab and build.importTab.controls and build.importTab.controls.enablePartyExportBuffs
+  if checkbox then
+    checkbox.state = params.enabled
+    checkbox.changeFunc(params.enabled)
+  else
+    partyTab.enableExportBuffs = params.enabled
+  end
+  recalcAfterPartyChange()
+  local exports = {}
+  -- PartyTab:Save's section names, keyed by the buffExports entry it reads.
+  for _, pair in ipairs({ { 'PlayerMods', 'PartyMemberStats' }, { 'Aura', 'Aura' }, { 'Curse', 'Curse' },
+      { 'Warcry', 'Warcry Skills' }, { 'Link', 'Link Skills' }, { 'EnemyConditions', 'EnemyConditions' }, { 'EnemyMods', 'EnemyMods' } }) do
+    local ok, textOut = pcall(partyTab.exportBuffs, partyTab, pair[1])
+    if ok and type(textOut) == 'string' and textOut ~= '' then exports[pair[2]] = textOut end
+  end
+  return { exportSupport = partyTab.enableExportBuffs == true, exports = exports }
+end
+
 return M

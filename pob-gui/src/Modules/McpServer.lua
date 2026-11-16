@@ -35,6 +35,9 @@ local MODIFIES_BUILD = {
   remove_skill = true, remove_gem = true, create_socket_group = true, add_gem = true, select_spec = true,
   create_spec = true, delete_spec = true, rename_spec = true, select_item_set = true,
   set_socket_group_enabled = true, import_character = true,
+  -- Party tab
+  party_import = true, party_clear = true, party_disable_effects = true, party_rebuild = true,
+  party_set_export_support = true,
 }
 -- Actions that work without a build open.
 local NO_BUILD_NEEDED = { ping = true, version = true, get_capabilities = true, gui_status = true,

@@ -549,6 +549,30 @@ name returned by `get_leagues` when Trade is enabled, or use `Standard` explicit
 | `search_cluster_jewels` | Search for cluster jewels by notable |
 | `generate_shopping_list` | Generate a prioritized shopping list from build analysis |
 
+### Calcs Breakdowns and Party Tab (Lua Bridge)
+
+| Tool | Description |
+|---|---|
+| `list_calc_breakdowns` | The Calcs tab's stats for the loaded build, with ids, values and the breakdown each opens |
+| `get_calc_breakdown` | A stat's breakdown as the Calcs tab shows it on hover: formula lines and source/modifier tables, from PoB itself; optional calculation mode and minion view |
+| `get_party` | The Party tab: imported auras, curses, warcries, links, party member stats and enemy modifiers, and what applies |
+| `party_import` | Import another build's exported support effects (code, build file or XML), replacing or appending, per destination |
+| `party_clear` / `party_disable_effects` / `party_rebuild` | The Party tab's Clear, Disable Party Effects and Rebuild All |
+| `set_party_export_support` | The Import/Export tab's Export Support, so the build's file or code carries its support effects |
+
+### Build Folders (Always Available)
+
+Paths are relative to the builds directory (`POB_DIRECTORY`) and cannot leave it. Nothing is overwritten.
+
+| Tool | Description |
+|---|---|
+| `list_build_folder` | One folder as PoB's build list shows it (folders first, level and class, sort modes), or a search of all subfolders |
+| `create_build_folder` | New folder |
+| `rename_build` | Rename a build or folder in place |
+| `move_build` | Move a build or folder to another folder (PoB's `[2]` naming when a build name is taken) |
+| `copy_build` | Copy a build or folder, under a new name or into another folder |
+| `delete_build` | Permanently delete a build or folder; needs `confirm: true` |
+
 ---
 
 ## Typical Workflows

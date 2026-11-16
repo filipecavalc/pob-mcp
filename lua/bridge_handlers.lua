@@ -253,6 +253,16 @@ return function(BuildOps, Compat, host)
   handlers.evaluate_anoint_candidates = evaluate_anoint_candidates
   handlers.generate_weighted_trade_query = generate_weighted_trade_query
 
+  -- Calcs tab breakdowns and Party tab
+  handlers.list_calc_breakdowns = op(BuildOps.list_calc_breakdowns, 'result')
+  handlers.get_calc_breakdown = op(BuildOps.get_calc_breakdown, 'result')
+  handlers.party_get = op(BuildOps.party_get, 'result')
+  handlers.party_import = op(BuildOps.party_import, 'result')
+  handlers.party_clear = op(BuildOps.party_clear, 'result')
+  handlers.party_disable_effects = op(BuildOps.party_disable_effects, 'result')
+  handlers.party_rebuild = op(BuildOps.party_rebuild, 'result')
+  handlers.party_set_export_support = op(BuildOps.party_set_export_support, 'result')
+
   handlers.get_capabilities = function()
     -- quit ends the stdio bridge's read loop; the desktop app's server has no such loop.
     local actions = host.mode == 'vanilla' and { 'quit' } or {}

@@ -38,6 +38,9 @@ import { handleSuggestWatchersEye } from "../handlers/jewelAdvisorHandlers.js";
 import { handleSuggestCrafting } from "../handlers/craftingAdvisorHandler.js";
 import { handleFindItemUpgrades as handleFindItemUpgradesNew } from "../handlers/itemShoppingHandler.js";
 import { handleClassifyItemAffixes, handleListCraftableMods, handleFindAffixTiers } from "../handlers/affixHandlers.js";
+import { handleListCalcBreakdowns, handleGetCalcBreakdown } from "../handlers/calcBreakdownHandlers.js";
+import { handleGetParty, handlePartyImport, handlePartyClear, handlePartyDisableEffects, handlePartyRebuild, handleSetPartyExportSupport } from "../handlers/partyHandlers.js";
+import { handleListBuildFolder, handleCreateBuildFolder, handleRenameBuild, handleMoveBuild, handleCopyBuild, handleDeleteBuild } from "../handlers/buildFolderHandlers.js";
 
 export interface ToolRouterDependencies {
   contextBuilder: ContextBuilder;
@@ -838,6 +841,74 @@ export async function routeToolCall(
         include_unobtainable: Boolean(args?.include_unobtainable),
         max_results: args?.max_results === undefined ? undefined : Number(args.max_results),
       });
+
+    // Calcs tab breakdowns and Party tab
+    case "list_calc_breakdowns":
+      return await handleListCalcBreakdowns(luaContext, {
+        filter: args?.filter as string | undefined,
+        minion: args?.minion === true,
+        mode: args?.mode as string | undefined,
+        includeHidden: args?.include_hidden === true,
+      });
+
+    case "get_calc_breakdown":
+      return await handleGetCalcBreakdown(luaContext, {
+        stat: args?.stat as string,
+        section: args?.section as string | undefined,
+        minion: args?.minion === true,
+        mode: args?.mode as string | undefined,
+      });
+
+    case "get_party":
+      return await handleGetParty(luaContext);
+
+    case "party_import":
+      return await handlePartyImport(luaContext, {
+        code: args?.code as string | undefined,
+        buildName: args?.build_name as string | undefined,
+        xml: args?.xml as string | undefined,
+        destination: args?.destination as string | undefined,
+        append: args?.append === true,
+      });
+
+    case "party_clear":
+      return await handlePartyClear(luaContext, args?.destination as string | undefined);
+
+    case "party_disable_effects":
+      return await handlePartyDisableEffects(luaContext);
+
+    case "party_rebuild":
+      return await handlePartyRebuild(luaContext);
+
+    case "set_party_export_support":
+      return await handleSetPartyExportSupport(luaContext, args?.enabled as boolean);
+
+    // Build folder management (files only, no open build needed)
+    case "list_build_folder":
+      return await handleListBuildFolder(handlerContext, {
+        path: args?.path as string | undefined,
+        filter: args?.filter as string | undefined,
+        sort: args?.sort as string | undefined,
+      });
+
+    case "create_build_folder":
+      return await handleCreateBuildFolder(handlerContext, { name: args?.name as string, path: args?.path as string | undefined });
+
+    case "rename_build":
+      return await handleRenameBuild(handlerContext, { path: args?.path as string, newName: args?.new_name as string });
+
+    case "move_build":
+      return await handleMoveBuild(handlerContext, { path: args?.path as string, toFolder: args?.to_folder as string | undefined });
+
+    case "copy_build":
+      return await handleCopyBuild(handlerContext, {
+        path: args?.path as string,
+        newName: args?.new_name as string | undefined,
+        toFolder: args?.to_folder as string | undefined,
+      });
+
+    case "delete_build":
+      return await handleDeleteBuild(handlerContext, { path: args?.path as string, confirm: args?.confirm === true });
 
     default:
       throw new Error(`Unknown tool: ${name}`);

@@ -34,6 +34,8 @@ Uses an **unmodified [PathOfBuildingCommunity](https://github.com/PathOfBuilding
 - **Flasks**: Toggle flasks active/inactive with immediate stat feedback
 - **Skills**: Full gem management — create socket groups, add/remove/level/quality gems
 - **Batch Operations**: `setup_skill_with_gems` and `add_multiple_items` for efficient workflows
+- **Crafting**: PoB's own "Craft item...", "Add modifier...", "Add Implicit...", "Corrupt..." and enchantment popups, driven from the MCP; item text in, item text out
+- **Item databases and sets**: search PoB's unique and rare template lists with its filters; create, copy, rename and delete item sets
 
 ### Build Optimization
 - **Defensive Analysis**: 3-layer framework (avoidance / mitigation / recovery) — evaluates EHP, spell suppression, armour/PDR, evasion, block, life regen, and leech
@@ -428,6 +430,34 @@ PoB versions and builds may expose additional slots such as `Ring 3` and `Graft 
 `get_equipped_items` reports equipped slot names; it omits empty slots. Skill groups
 use their own slot list in the tool schema.
 
+### Lua Bridge — Items Tab: Crafting, Databases, Item Sets
+
+These drive the Items tab's own popups and lists inside PoB (the dropdowns are
+set and the buttons pressed as a user would), so the mod pools, labels, sort
+orders and the item text are PoB's. Crafting tools take item text and return
+item text; `simulate_slot` runs `lua_simulate` on the result and `equip_slot`
+adds it through `add_item`. Listing calls accept `sort_by` (a stat such as
+`FullDPS` or `Life`), which ranks the options by PoB's calculation on the loaded
+build, as the popups' "Sort by" does.
+
+| Tool | PoB feature |
+|---|---|
+| `craft_item_bases` | Base types and bases of "Craft item..." |
+| `craft_item_create` | "Craft item..." (base, rarity, name) or "Create custom..." (item text) |
+| `craft_item_affixes` | Prefix/suffix dropdowns, tiers and roll sliders of a crafted magic or rare item |
+| `craft_item_properties` | Influences (incl. Searing Exarch / Eater of Worlds), quality, catalyst, line rolls, "Remove" of crafted/custom mods |
+| `craft_item_add_modifier` | "Add modifier...": bench, essence, veiled, beastcraft, necropolis, delve, prefix/suffix, custom |
+| `craft_item_add_implicit` | "Add Implicit...": eldritch, delve and custom implicits |
+| `craft_item_corrupt` | "Corrupt...": corruption implicits, Scourge up/downsides, unique roll ranges |
+| `craft_item_enchant` | "Change Enchantment..." (anoints: `find_best_anointment`) |
+| `search_item_db` | Unique and rare template lists with PoB's filters, search and stat sort |
+| `manage_item_set` | Item set New / Copy / Rename / Delete (`confirm: true`) |
+| `list_shared_items` | Shared items and item sets from PoB's settings (read only; the desktop window has the user's) |
+
+`list_craftable_mods`, `find_affix_tiers` and `suggest_crafting` stay as quick
+lookups in PoB's mod tables that need no item or build; the `craft_item_*` tools
+work on a concrete item with the pools PoB offers for it.
+
 ### Build Optimization (Always Advertised)
 
 | Tool | Description | Runtime requirements |
@@ -606,6 +636,16 @@ before interpreting the stats.
 1. lua_load_build (build_name: "MyBuild.xml")
 2. find_best_anointment (slot: "Amulet", focus: "both")
 3. find_weighted_trade_items (league: "Standard", slot: "Amulet")   ← requires POE_TRADE_ENABLED + POE_SESSION_ID
+```
+
+### Craft an item and try it on
+```
+1. craft_item_create (base: "Hubris Circlet", rarity: "RARE")
+2. craft_item_affixes (item_text, list: "prefix", sort_by: "Life")
+3. craft_item_affixes (item_text, changes: [{ type: "prefix", modifier: "maximum Life", tier: 1, roll: 1 }])
+4. craft_item_add_modifier (item_text, source: "MASTER", modifier: ...)
+5. craft_item_corrupt (item_text, implicits: [...], simulate_slot: "Helmet")
+6. add_item (item_text, slot_name: "Helmet")   or equip_slot on any craft_item_* call
 ```
 
 ---

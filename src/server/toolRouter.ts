@@ -38,6 +38,10 @@ import { handleSuggestWatchersEye } from "../handlers/jewelAdvisorHandlers.js";
 import { handleSuggestCrafting } from "../handlers/craftingAdvisorHandler.js";
 import { handleFindItemUpgrades as handleFindItemUpgradesNew } from "../handlers/itemShoppingHandler.js";
 import { handleClassifyItemAffixes, handleListCraftableMods, handleFindAffixTiers } from "../handlers/affixHandlers.js";
+import { handleRankGemsByDps, handleListSkillSets, handleSelectSkillSet, handleCreateSkillSet, handleRenameSkillSet, handleDeleteSkillSet,
+  handleListConfigSets, handleSelectConfigSet, handleCreateConfigSet, handleRenameConfigSet, handleDeleteConfigSet, handleListSpectres,
+  handleSetSpectres, handleGetMinionOptions, handleSetMinion, handleGetCustomMods, handleSetCustomMods,
+  type RankGemsArgs, type SetCustomModsArgs, type SkillsConfigContext } from "../handlers/skillsConfigHandlers.js";
 
 export interface ToolRouterDependencies {
   contextBuilder: ContextBuilder;
@@ -839,7 +843,81 @@ export async function routeToolCall(
         max_results: args?.max_results === undefined ? undefined : Number(args.max_results),
       });
 
+    // Skills tab, config tab and minions
+    case "rank_gems_by_dps":
+      return await handleRankGemsByDps(skillsConfigContext(deps), (args || {}) as RankGemsArgs);
+
+    case "list_skill_sets":
+      return await handleListSkillSets(skillsConfigContext(deps));
+
+    case "select_skill_set":
+      return await handleSelectSkillSet(skillsConfigContext(deps), { id: args?.id as number | undefined });
+
+    case "create_skill_set":
+      return await handleCreateSkillSet(skillsConfigContext(deps), {
+        title: args?.title as string | undefined,
+        copy_from: args?.copy_from as number | undefined,
+        activate: args?.activate as boolean | undefined,
+      });
+
+    case "rename_skill_set":
+      return await handleRenameSkillSet(skillsConfigContext(deps), { id: args?.id as number | undefined, title: args?.title as string | undefined });
+
+    case "delete_skill_set":
+      return await handleDeleteSkillSet(skillsConfigContext(deps), { id: args?.id as number | undefined, confirm: args?.confirm as boolean | undefined });
+
+    case "list_config_sets":
+      return await handleListConfigSets(skillsConfigContext(deps));
+
+    case "select_config_set":
+      return await handleSelectConfigSet(skillsConfigContext(deps), { id: args?.id as number | undefined });
+
+    case "create_config_set":
+      return await handleCreateConfigSet(skillsConfigContext(deps), {
+        title: args?.title as string | undefined,
+        copy_from: args?.copy_from as number | undefined,
+        activate: args?.activate as boolean | undefined,
+      });
+
+    case "rename_config_set":
+      return await handleRenameConfigSet(skillsConfigContext(deps), { id: args?.id as number | undefined, title: args?.title as string | undefined });
+
+    case "delete_config_set":
+      return await handleDeleteConfigSet(skillsConfigContext(deps), { id: args?.id as number | undefined, confirm: args?.confirm as boolean | undefined });
+
+    case "list_spectres":
+      return await handleListSpectres(skillsConfigContext(deps), {
+        search: args?.search as string | undefined,
+        search_mode: args?.search_mode as string | undefined,
+        limit: args?.limit as number | undefined,
+      });
+
+    case "set_spectres":
+      return await handleSetSpectres(skillsConfigContext(deps), { add: args?.add, remove: args?.remove });
+
+    case "get_minion_options":
+      return await handleGetMinionOptions(skillsConfigContext(deps), { calcs: args?.calcs as boolean | undefined });
+
+    case "set_minion":
+      return await handleSetMinion(skillsConfigContext(deps), {
+        calcs: args?.calcs as boolean | undefined,
+        minion: args?.minion as string | undefined,
+        item_set_id: args?.item_set_id as number | undefined,
+        minion_skill: args?.minion_skill as number | string | undefined,
+      });
+
+    case "get_custom_mods":
+      return await handleGetCustomMods(skillsConfigContext(deps), { search: args?.search as string | undefined, limit: args?.limit as number | undefined });
+
+    case "set_custom_mods":
+      return await handleSetCustomMods(skillsConfigContext(deps), (args || {}) as SetCustomModsArgs);
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
 }
+
+const skillsConfigContext = (deps: ToolRouterDependencies): SkillsConfigContext => ({
+  getLuaClient: deps.getLuaClient,
+  ensureLuaClient: deps.ensureLuaClient,
+});

@@ -549,6 +549,27 @@ name returned by `get_leagues` when Trade is enabled, or use `Standard` explicit
 | `search_cluster_jewels` | Search for cluster jewels by notable |
 | `generate_shopping_list` | Generate a prioritized shopping list from build analysis |
 
+### Lua Bridge — Skill Sets, Config Sets, Minions and Custom Modifiers
+
+| Tool | Description |
+|---|---|
+| `rank_gems_by_dps` | Rank the gems for a socket group's gem slot by PoB's own DPS ("Sort gems by DPS"): each candidate's DPS and change |
+| `list_skill_sets` / `select_skill_set` | List the skill sets, switch the active one |
+| `create_skill_set` / `rename_skill_set` | New (empty) or copied skill set; rename |
+| `delete_skill_set` | Delete a skill set (needs `confirm: true`) |
+| `list_config_sets` / `select_config_set` | List the config sets, switch the active one |
+| `create_config_set` / `rename_config_set` | New (PoB defaults) or copied config set; rename |
+| `delete_config_set` | Delete a config set (needs `confirm: true`) |
+| `list_spectres` / `set_spectres` | The build's spectre list and PoB's spectre library search; add or remove spectres |
+| `get_minion_options` / `set_minion` | The main skill's minion, its item set, and the minion skill shown (sidebar or Calcs tab) |
+| `get_custom_mods` / `set_custom_mods` | The config tab's custom modifier groups, with PoB's parse of each line and its Add Mod browser; add, edit, enable or remove groups |
+
+`rank_gems_by_dps` drives PoB's gem dropdown, so its numbers are PoB's: for
+every sort field except Full DPS they are the main skill's, as in PoB. The
+older `suggest_support_gems` and `compare_gem_setups` work from archetype
+templates and do not calculate. `set_config` also accepts `customMods`, which
+sets the text of the first custom modifier group.
+
 ---
 
 ## Typical Workflows

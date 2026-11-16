@@ -169,6 +169,7 @@ function itemName(item: CompareItemRow["primary"]): string {
 function formatItemRow(row: CompareItemRow, lines: string[]) {
   const notes: string[] = [];
   if (row.slotMissingInPrimary) notes.push("loaded build has no Ring 3 slot");
+  if (row.status === "match" && row.identical === false) notes.push("same name, different item");
   if (row.primary && row.primaryNodeAllocated === false) notes.push("socket not allocated in loaded build");
   if (row.compare && row.compareNodeAllocated === false) notes.push("socket not allocated in compared build");
   const where = row.nodeId !== undefined ? `${row.slotName} (${row.slot})` : row.slot;
@@ -368,7 +369,7 @@ export async function handleCompareBuySimilar(context: LuaHandlerContext, args: 
       if (tradeClient) {
         try {
           params.league = defaultTradeLeague((await tradeClient.getLeagues()).result ?? [], realm);
-          leagueNote = " (the popup's default for the realm)";
+          leagueNote = " (the popup's default for the realm, read from the trade site's league list)";
         } catch (e) {
           noteIgnoredError("trade leagues for the Buy Similar default (PoB falls back to Standard)", e);
           leagueNote = " (league list unavailable; PoB's fallback)";

@@ -152,6 +152,10 @@ describe('compare_differences', () => {
     expect(out).toContain('Constitution (Notable, id 55485)');
     expect(out).toContain('[loaded: Hypnotic Vessel | compared: Foulborn The Red Dream]');
     expect(out).toContain('- Helmet: different');
+    expect(formatCompareReport({ ...report, stats: undefined, tree: undefined, skills: undefined, config: undefined, calcs: undefined,
+      items: { primaryItemSet: 'A', compareItemSet: 'B', jewels: [], slots: [{ slot: 'Amulet', slotName: 'Amulet', status: 'match', identical: false,
+        primary: { name: 'Eye of Chayula, Onyx Amulet' }, compare: { name: 'Eye of Chayula, Onyx Amulet' } }] } }))
+      .toContain('- Amulet: match (same name, different item)');
     expect(out).toContain('+ +117 to maximum Life');
     expect(out).toContain('equipping the compared item: -122 Total Life (-2.2%)');
     expect(out).toContain('loaded:   Frostblink 19/0, + Arcane Surge 19/0');
@@ -199,11 +203,12 @@ describe('compare_buy_similar', () => {
     expect(defaultTradeLeague([], 'pc')).toBe('Standard');
   });
 
-  it('does not touch the trade site unless run_search is set', async () => {
+  it('only reads the league list, as the popup does, unless run_search is set', async () => {
     const lua = makeLua();
     const trade = { getLeagues: jest.fn(async () => ({ result: [{ id: 'Keepers', realm: 'pc' }] })), searchItems: jest.fn() };
     const out = textOf(await handleCompareBuySimilar(makeContext(lua), { slot: 'Body Armour', mods: 'all' }, trade as never));
     expect(lua.compareBuySimilar).toHaveBeenCalledWith({ slot: 'Body Armour', mods: 'all', league: 'Keepers' });
+    expect(trade.getLeagues).toHaveBeenCalledTimes(1);
     expect(trade.searchItems).not.toHaveBeenCalled();
     expect(out).toContain('URL: https://www.pathofexile.com/trade/search/Keepers?q=');
     expect(out).toContain('"name": "Cloak of Flame"');

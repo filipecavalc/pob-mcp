@@ -1116,7 +1116,7 @@ export function getLuaToolSchemas(): ToolSchema[] {
     },
     {
       name: "compare_differences",
-      description: "How the active comparison build differs from the loaded build, computed the way PoB's Compare tab does: stats (Summary view: every sidebar stat relevant to either skill, with difference and %), tree (overlay: nodes only in one build, and allocated nodes whose mastery or jewel differs), items (per slot match/different/missing/extra, jewel sockets, optional mod-by-mod markers and the stat change of equipping each compared item), skills (socket groups paired by gem similarity; gems common/only here/only there), config (options whose values differ), calcs (Calcs view rows, using PoB's own 'Show only differences' test). only_differences (default true) keeps only rows that differ.",
+      description: "How the active comparison build differs from the loaded build, computed the way PoB's Compare tab does: stats (Summary view: every sidebar stat relevant to either skill, with difference and %), tree (overlay: nodes only in one build, and allocated nodes whose mastery or jewel differs), items (per slot match/different/missing/extra, jewel sockets, optional mod-by-mod markers and the stat change of equipping each compared item), skills (socket groups paired by gem similarity; gems common/only here/only there), config (options whose values differ), calcs (Calcs view rows, using PoB's own 'Show only differences' test). only_differences (default true) keeps only rows that differ; an item slot differs when the item text differs, even if PoB labels same-named items a 'match'.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1159,7 +1159,7 @@ export function getLuaToolSchemas(): ToolSchema[] {
     },
     {
       name: "compare_buy_similar",
-      description: "The Items view's Buy button for a compared build's item: PoB builds the pathofexile.com trade search (CompareBuySimilar) for it. Returns the URL and query, and the mod and defence choices of the popup. As in the popup nothing is ticked by default; pick mods by number or 'all'. Uniques are searched by name. Does not call the trade site unless run_search is set (one search request).",
+      description: "The Items view's Buy button for a compared build's item: PoB builds the pathofexile.com trade search (CompareBuySimilar) for it. Returns the URL and query, and the mod and defence choices of the popup. As in the popup nothing is ticked by default; pick mods by number or 'all'. Uniques are searched by name. Reaches the trade site only to read its league list when no league is given (as the popup does), and for one search request when run_search is set.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1182,7 +1182,7 @@ export function getLuaToolSchemas(): ToolSchema[] {
     },
     {
       name: "compare_copy",
-      description: "Copy from the compared build into the loaded build, as the Compare tab's buttons do: what 'tree' adds the compared build's active tree as a new tree set ('Copy tree'; use true = 'Copy and use'); 'item' adds the compared item of a slot to the loaded build's items ('Copy'; use true = 'Equip' into the same slot); 'config' copies all its config values into the loaded build's active config set. Changes the loaded build in memory; save with lua_save_build.",
+      description: "Copy from the compared build into the loaded build, as the Compare tab's buttons do: what 'tree' adds the compared build's active tree as a new tree set ('Copy tree'; use true = 'Copy and use'); 'item' adds the compared item of a slot to the loaded build's items ('Copy'; use true = 'Equip' into the same slot, refused for Ring 3 when the loaded build has no third ring slot, where PoB shows 'Missing slot'); 'config' copies all its config values into the loaded build's active config set. Changes the loaded build in memory; save with lua_save_build.",
       inputSchema: {
         type: "object",
         properties: {

@@ -119,6 +119,8 @@ export interface CompareItemRow {
   primaryNodeAllocated?: boolean;
   compareNodeAllocated?: boolean;
   slotMissingInPrimary?: boolean;
+  /** Same item text on both sides (PoB's label says "match" on equal names only). */
+  identical?: boolean;
   primaryMods?: CompareModLine[];
   compareMods?: CompareModLine[];
   equipStatChanges?: string[];

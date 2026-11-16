@@ -1948,8 +1948,18 @@ function M.compare_select(params)
   local ct, err = compareTab()
   if not ct then return nil, err end
   params = type(params) == 'table' and params or {}
-  local entry, index = compareEntryAt(ct, params.index)
-  if not entry then return nil, index end
+  -- Validate every choice before changing anything, so a bad one leaves the
+  -- tab and the compared build as they were.
+  local target
+  if params.index ~= nil then
+    target = ct.compareEntries[tonumber(params.index) or -1]
+    if not target then
+      return nil, string.format('comparison %s not found (loaded: 1-%d)', tostring(params.index), #ct.compareEntries)
+    end
+  else
+    target = ct:GetActiveCompare()
+  end
+  if not target then return nil, 'no comparison build loaded; use compare_add_build first' end
   local function pick(orderList, value, what)
     local i = tonumber(value)
     if not i or not orderList[i] then
@@ -1957,52 +1967,76 @@ function M.compare_select(params)
     end
     return i
   end
-  local changed = {}
+  local sel, perr = {}, nil
   if params.tree_set ~= nil then
-    local i, perr = pick(entry.treeTab.specList, params.tree_set, 'tree set')
-    if not i then return nil, perr end
-    entry:SetActiveSpec(i)
+    sel.tree, perr = pick(target.treeTab.specList, params.tree_set, 'tree set')
+    if not sel.tree then return nil, perr end
+  end
+  if params.skill_set ~= nil then
+    sel.skill, perr = pick(target.skillsTab.skillSetOrderList, params.skill_set, 'skill set')
+    if not sel.skill then return nil, perr end
+  end
+  if params.item_set ~= nil then
+    sel.item, perr = pick(target.itemsTab.itemSetOrderList, params.item_set, 'item set')
+    if not sel.item then return nil, perr end
+  end
+  if params.config_set ~= nil then
+    sel.config, perr = pick(target.configTab.configSetOrderList, params.config_set, 'config set')
+    if not sel.config then return nil, perr end
+  end
+  -- Socket groups belong to the skill set: check them against the one that
+  -- will be active (SkillsTab:SetActiveSkillSet swaps socketGroupList).
+  local groups = target.skillsTab.socketGroupList
+  if sel.skill then
+    local skillSet = target.skillsTab.skillSets[target.skillsTab.skillSetOrderList[sel.skill]]
+    groups = skillSet and skillSet.socketGroupList or groups
+  end
+  if params.main_socket_group ~= nil then
+    sel.main, perr = pick(groups, params.main_socket_group, 'socket group')
+    if not sel.main then return nil, perr end
+  end
+  if params.calcs_socket_group ~= nil then
+    sel.calcs, perr = pick(groups, params.calcs_socket_group, 'socket group')
+    if not sel.calcs then return nil, perr end
+  end
+  if params.calcs_buff_mode ~= nil then
+    sel.mode = tostring(params.calcs_buff_mode):upper()
+    if not CALCS_BUFF_MODES[sel.mode] then return nil, 'calcs_buff_mode must be UNBUFFED, BUFFED, COMBAT or EFFECTIVE' end
+  end
+
+  local entry, index = compareEntryAt(ct, params.index)
+  if not entry then return nil, index end
+  local changed = {}
+  if sel.tree then
+    entry:SetActiveSpec(sel.tree)
     if build.spec then build.spec:SetWindowTitleWithBuildClass() end
     table.insert(changed, 'tree_set')
   end
-  if params.skill_set ~= nil then
-    local i, perr = pick(entry.skillsTab.skillSetOrderList, params.skill_set, 'skill set')
-    if not i then return nil, perr end
-    entry:SetActiveSkillSet(entry.skillsTab.skillSetOrderList[i])
+  if sel.skill then
+    entry:SetActiveSkillSet(entry.skillsTab.skillSetOrderList[sel.skill])
     table.insert(changed, 'skill_set')
   end
-  if params.item_set ~= nil then
-    local i, perr = pick(entry.itemsTab.itemSetOrderList, params.item_set, 'item set')
-    if not i then return nil, perr end
-    entry:SetActiveItemSet(entry.itemsTab.itemSetOrderList[i])
+  if sel.item then
+    entry:SetActiveItemSet(entry.itemsTab.itemSetOrderList[sel.item])
     table.insert(changed, 'item_set')
   end
-  if params.config_set ~= nil then
-    local i, perr = pick(entry.configTab.configSetOrderList, params.config_set, 'config set')
-    if not i then return nil, perr end
-    entry.configTab:SetActiveConfigSet(entry.configTab.configSetOrderList[i])
+  if sel.config then
+    entry.configTab:SetActiveConfigSet(entry.configTab.configSetOrderList[sel.config])
     entry.buildFlag = true
     ct.configNeedsRebuild = true
     table.insert(changed, 'config_set')
   end
-  local groups = entry.skillsTab.socketGroupList
-  if params.main_socket_group ~= nil then
-    local i, perr = pick(groups, params.main_socket_group, 'socket group')
-    if not i then return nil, perr end
-    entry:SetMainSocketGroup(i)
+  if sel.main then
+    entry:SetMainSocketGroup(sel.main)
     table.insert(changed, 'main_socket_group')
   end
-  if params.calcs_socket_group ~= nil then
-    local i, perr = pick(groups, params.calcs_socket_group, 'socket group')
-    if not i then return nil, perr end
-    entry.calcsTab.input.skill_number = i
+  if sel.calcs then
+    entry.calcsTab.input.skill_number = sel.calcs
     entry.buildFlag = true
     table.insert(changed, 'calcs_socket_group')
   end
-  if params.calcs_buff_mode ~= nil then
-    local mode = tostring(params.calcs_buff_mode):upper()
-    if not CALCS_BUFF_MODES[mode] then return nil, 'calcs_buff_mode must be UNBUFFED, BUFFED, COMBAT or EFFECTIVE' end
-    entry.calcsTab.input.misc_buffMode = mode
+  if sel.mode then
+    entry.calcsTab.input.misc_buffMode = sel.mode
     entry.buildFlag = true
     table.insert(changed, 'calcs_buff_mode')
   end
@@ -2231,17 +2265,27 @@ local function compareItems(ct, entry, onlyDifferences, expanded, statChanges)
   local pEnv = build.calcsTab.mainEnv
   local primaryHasRing3 = pEnv and pEnv.modDB:Flag(nil, 'AdditionalRingSlot')
   local pTab, cTab = build.itemsTab, entry.itemsTab
+  -- PoB's label calls items with the same name a "match"; whether a slot
+  -- differs is decided on the full item text instead, as the tree overlay's
+  -- jewel comparison does (compareJewelsEqual in PassiveTreeView).
+  local function sameItem(a, b)
+    if not a or not b then return a == b end
+    return a:BuildRaw() == b:BuildRaw()
+  end
   local function row(label, slotName, pItem, cItem, extra)
     local diffLabel = stripColourCodes(tradeHelpers.getSlotDiffLabel(pItem, cItem)):gsub('^%((.*)%)$', '%1')
-    if onlyDifferences and (diffLabel == 'match' or diffLabel == 'both empty') then return nil end
-    local r = { slot = label, slotName = slotName, status = diffLabel, primary = itemSummary(pItem), compare = itemSummary(cItem) }
+    local identical = sameItem(pItem, cItem)
+    if onlyDifferences and identical then return nil end
+    local r = { slot = label, slotName = slotName, status = diffLabel, identical = identical, primary = itemSummary(pItem), compare = itemSummary(cItem) }
     for k, v in pairs(extra or {}) do r[k] = v end
     if expanded then
       local pMap, cMap = tradeHelpers.buildModMap(pItem), tradeHelpers.buildModMap(cItem)
       r.primaryMods = itemModLines(tradeHelpers, pItem, cMap)
       r.compareMods = itemModLines(tradeHelpers, cItem, pMap)
     end
-    if statChanges and cItem and cItem.raw and diffLabel ~= 'match' then
+    -- No Equip button (and so no tooltip) where the loaded build lacks the
+    -- slot: TradeHelpers.drawCopyButtons shows "Missing slot" instead.
+    if statChanges and cItem and cItem.raw and not identical and not r.slotMissingInPrimary then
       local ok, lines = pcall(equipStatChanges, slotName, cItem)
       r.equipStatChanges = ok and lines or { 'failed: ' .. tostring(lines) }
     end
@@ -2500,8 +2544,6 @@ local function compareCalcs(ct, entry, onlyDifferences, filter)
   end
   local sections = {}
   local rowCount = 0
-  local saved = ct.calcsShowOnlyDifferences
-  ct.calcsShowOnlyDifferences = onlyDifferences
   for _, secDef in ipairs(ct.calcSections) do
     local id, group, subSections = secDef[2], secDef[3], secDef[5]
     local secData = subSections[1].data
@@ -2541,7 +2583,6 @@ local function compareCalcs(ct, entry, onlyDifferences, filter)
       if #subs > 0 then table.insert(sections, { id = id, group = group, subSections = subs }) end
     end
   end
-  ct.calcsShowOnlyDifferences = saved
   local function skillLabel(b, env)
     local group = b.skillsTab.socketGroupList[b.calcsTab.input.skill_number]
     return group and socketGroupLabel(group, b.calcsTab.input.skill_number) or nil
@@ -2634,6 +2675,8 @@ function M.compare_power_report(params)
     if e.stat:lower() == wantedMetric or tostring(e.label):lower() == wantedMetric then powerStat = e break end
   end
   if not powerStat then return { metrics = metricList, unknownMetric = params.metric } end
+  local sortCol = POWER_SORT_COLUMNS[tostring(params.sort_by or 'impact')]
+  if not sortCol then return nil, 'sort_by must be category, impact, points or per_point' end
   local entry, index = compareEntryAt(ct, params.index)
   if not entry then return nil, index end
   refreshPrimary()
@@ -2679,8 +2722,6 @@ function M.compare_power_report(params)
   local results = ct.comparePowerResults or {}
   local listControl = ct.controls.comparePowerReportList
   listControl:SetReport(powerStat, results)
-  local sortCol = POWER_SORT_COLUMNS[tostring(params.sort_by or 'impact')]
-  if not sortCol then return nil, 'sort_by must be category, impact, points or per_point' end
   if sortCol ~= 3 then listControl:ReSort(sortCol) end
   local limit = tonumber(params.limit)
   local rows = {}
@@ -2888,13 +2929,21 @@ function M.compare_copy(params)
   elseif what == 'item' then
     local item, copySlotName, equipSlotName = compareItemForSlot(ct, entry, params.slot)
     if not item then return nil, copySlotName end
-    local maxIdBefore = 0
-    for id in pairs(build.itemsTab.items) do if id > maxIdBefore then maxIdBefore = id end end
+    -- DrawItems passes slotMissing for Ring 3 when the loaded build has no
+    -- third ring slot; that row shows "Missing slot" instead of Equip.
+    local pEnv = build.calcsTab.mainEnv
+    if use and equipSlotName == 'Ring 3' and not (pEnv and pEnv.modDB:Flag(nil, 'AdditionalRingSlot')) then
+      return nil, 'the loaded build has no Ring 3 slot (PoB shows "Missing slot" there, no Equip); copy without use to add the item unequipped'
+    end
+    -- ItemsTab:AddItem takes the lowest free id, so the new item is the one
+    -- whose id was not there before, not necessarily the highest.
+    local idsBefore = {}
+    for id in pairs(build.itemsTab.items) do idsBefore[id] = true end
     -- The Items view copies from copySlotName and equips into equipSlotName;
     -- for gear and jewel sockets both are the same slot name.
     ct:CopyCompareItemToPrimary(use and equipSlotName or copySlotName, entry, use)
     local newItem
-    for id, it in pairs(build.itemsTab.items) do if id > maxIdBefore and (not newItem or id > newItem.id) then newItem = it end end
+    for id, it in pairs(build.itemsTab.items) do if not idsBefore[id] then newItem = it end end
     if not newItem then return nil, 'the item was not copied' end
     result.item = itemSummary(newItem)
     result.slot = equipSlotName

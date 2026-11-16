@@ -1071,15 +1071,15 @@ export function getLuaToolSchemas(): ToolSchema[] {
     {
       name: "get_node_power",
       truncatable: true,
-      description: "PoB's own node power report for the loaded build (Tree tab: 'Show Node Power' + 'Show Power Report'): every passive node valued by PoB's calculator for one stat, with the path cost (points) PoB reports and the value per point including the path. Runs PoB's power builder to completion (about 4-12 s on a full tree; less with max_depth). Unlike suggest_optimal_nodes (keyword matching), every number is a real PoB calculation.",
+      description: "PoB's own node power report for the loaded build (Tree tab: 'Show Node Power' + 'Show Power Report'): every passive node within reach (all of them by default) valued by PoB's calculator for one stat, with the path cost (points) PoB reports and the value per point including the path. Differs from get_passive_upgrades (a keyword-picked shortlist of notables scored without path cost) and suggest_optimal_nodes (keyword matching, no calculation). Slow: PoB's power builder runs to completion, 4-13 s on a full tree and longer when Full DPS sums several skills; pass max_depth (e.g. 5-8) for a faster, nearer report. The request waits up to 180 s.",
       inputSchema: {
         type: "object",
         properties: {
           stat: {
             type: "string",
-            description: "Stat key or label from PoB's power stat list, e.g. FullDPS, CombinedDPS, TotalDot, IgniteDPS, Life, LifeRegen, EnergyShield, Armour, Evasion, TotalEHP, SecondMinimalMaximumHitTaken, FireTakenHit, SpellSuppressionChance, BlockChance, Str (default: FullDPS). An unknown name lists them all. 'Offence/Defence' has no report in PoB.",
+            description: "Stat key or label from PoB's power stat list, e.g. CombinedDPS, FullDPS (only for builds with skills in Full DPS), TotalDot, IgniteDPS, Life, LifeRegen, EnergyShield, Armour, Evasion, TotalEHP, SecondMinimalMaximumHitTaken, FireTakenHit, SpellSuppressionChance, BlockChance, Str (default: CombinedDPS). An unknown name lists them all. 'Offence/Defence' has no report in PoB.",
           },
-          max_depth: { type: "number", description: "PoB's node distance limit (its 'All/5/10/15/Custom' dropdown); default all. Lower is faster." },
+          max_depth: { type: "number", description: "PoB's node distance limit in points (its 'All/5/10/15/Custom' dropdown); default all. Lower is much faster: depth 5 took about 4 s where the full tree took 11 s." },
           filter: {
             type: "string",
             enum: ["unallocated", "unallocated_and_clusters", "allocated"],
@@ -1212,7 +1212,7 @@ export function getOptimizationToolSchemas(): ToolSchema[] {
     {
       name: "suggest_optimal_nodes",
       truncatable: true,
-      description: "AI-powered suggestion of optimal passive nodes based on build goals",
+      description: "Keyword-based suggestion of passive nodes matching a build goal; the nodes are not simulated or checked for reachability. For nodes ranked by PoB's own calculator with path cost, use get_node_power.",
       inputSchema: {
         type: "object",
         properties: {
@@ -2006,7 +2006,7 @@ export function getBuildGoalsToolSchemas(): ToolSchema[] {
     {
       name: "get_passive_upgrades",
       truncatable: true,
-      description: "Find the best unallocated notable passives to pick up next, ranked by their actual stat impact. Uses calcWith to simulate each candidate and scores by relative DPS/EHP gain.",
+      description: "Find the best unallocated notable passives to pick up next, ranked by their actual stat impact. Uses calcWith to simulate each candidate and scores by relative DPS/EHP gain. Candidates come from a keyword search (up to about 60 notables) and are scored without their path cost; for PoB's own report over every node with path cost and per-point value, use get_node_power.",
       inputSchema: {
         type: "object",
         properties: {

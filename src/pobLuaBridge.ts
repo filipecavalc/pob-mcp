@@ -13,6 +13,10 @@ import type { NodePowerParams, NodePowerReport, TimelessSearchParams, TimelessOp
 // params is only ever serialised, so an interface with declared keys is as valid
 // a payload here as a bag of unknowns.
 export type LuaRequest = { action: string; params?: object };
+/** Per-request transport options. minTimeoutMs raises the reply timeout for one long action (never lowers it). */
+export type LuaSendOptions = { minTimeoutMs?: number };
+/** node_power runs PoB's power builder to completion: 4-13 s on a full tree, more with several Full DPS skills. */
+export const NODE_POWER_TIMEOUT_MS = 180_000;
 /** Lua bridge response envelope — always an object with at minimum `ok: boolean` */
 export type LuaResponse = { ok: boolean; error?: string; [key: string]: unknown };
 
@@ -574,7 +578,7 @@ export class PoBLuaApiClient {
   }
 
   /** Overridden by transports other than the stdio process (see pobGuiClient.ts). */
-  protected async send(obj: LuaRequest): Promise<LuaResponse> {
+  protected async send(obj: LuaRequest, options?: LuaSendOptions): Promise<LuaResponse> {
     if (!this.proc || !this.proc.stdin) throw new Error("Process not started");
     if (this.killed) throw new Error("PoB API exited");
     if (!this.ready) throw new Error("Process not ready");
@@ -592,7 +596,7 @@ export class PoBLuaApiClient {
       while (attempts < maxAttempts) {
         let line: string;
         try {
-          line = await this.readLineWithTimeout(this.options.timeoutMs);
+          line = await this.readLineWithTimeout(Math.max(this.options.timeoutMs, options?.minTimeoutMs ?? 0));
         } catch (err) {
           // A timed-out request leaves the protocol desynced: the late reply
           // would be consumed as the answer to the NEXT request. Kill the
@@ -1003,7 +1007,7 @@ async setTree(params: {
 
   /** PoB's node power report (Tree tab: Show Node Power / Show Power Report) for one stat. */
   async nodePower(params: NodePowerParams): Promise<NodePowerReport> {
-    const res = await this.send({ action: "node_power", params });
+    const res = await this.send({ action: "node_power", params }, { minTimeoutMs: NODE_POWER_TIMEOUT_MS });
     if (!res.ok) throw new Error(res.error || "node_power failed");
     return res.result as NodePowerReport;
   }

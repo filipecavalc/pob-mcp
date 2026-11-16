@@ -67,7 +67,14 @@ export function formatNodePowerReport(report: NodePowerReport, wallMs?: number):
     '',
   ];
   if (!report.nodes.length) {
-    lines.push(report.filter === 'allocated' ? 'No allocated nodes in the report.' : `No node gains ${report.label} within this depth.`);
+    if (report.filter === 'allocated') {
+      lines.push('No allocated nodes in the report.');
+    } else {
+      lines.push(`No node changes ${report.label} for this build${report.maxDepth ? ` within ${report.maxDepth} points` : ''}.`);
+      lines.push(report.stat === 'FullDPS'
+        ? 'Full DPS stays 0 unless skills are included in Full DPS; try stat CombinedDPS, or TotalDot / IgniteDPS for damage over time.'
+        : 'Try another stat (CombinedDPS, TotalDot, Life, TotalEHP, ...)' + (report.maxDepth ? ' or a larger max_depth.' : '.'));
+    }
   }
   report.nodes.forEach((entry, i) => {
     const power = `${formatPower(entry.power, report.fmt)}${percentOfBase(entry)}`;

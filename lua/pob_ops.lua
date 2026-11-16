@@ -1873,7 +1873,7 @@ local function runPowerBuilder(calcsTab, stat, maxDepth)
   return ok, err, seconds, resumes
 end
 
--- params: { stat, maxDepth?, filter? ('unallocated'|'unallocated_and_clusters'|'allocated'),
+-- params: { stat? (default CombinedDPS), maxDepth?, filter? ('unallocated'|'unallocated_and_clusters'|'allocated'),
 --           showMasteries?, sortBy? ('power'|'per_point'|'points'|'type'), types?, limit? }
 -- The report is TreeTab:BuildPowerReportList, filtered and sorted by PoB's
 -- PowerReportListControl (ReList / ReSort), as the "Show Power Report" list.
@@ -1881,7 +1881,7 @@ function M.node_power(params)
   local ready, readyErr = treeReady()
   if not ready then return nil, readyErr end
   params = params or {}
-  local wanted = lowerText(params.stat or 'FullDPS')
+  local wanted = lowerText(params.stat or 'CombinedDPS')
   local stat
   local choices = {}
   for _, entry in ipairs(nodePowerStats()) do
@@ -2226,6 +2226,12 @@ local function runTimelessDialog(params)
       controls.protectAllocatedButtonAdd.onClick()
     end
 
+    -- PoB's Search leaves both result tables alone when it finds nothing to
+    -- search (Reclaimed Malevolence without a path to the class start): start
+    -- from empty ones so no earlier results show under this search. The
+    -- build's own results come back with the restored state.
+    wipeTable(build.timelessData.searchResults)
+    wipeTable(build.timelessData.sharedResults)
     local started = os.clock()
     controls.searchButton.onClick()
     local seconds = os.clock() - started
@@ -2351,14 +2357,32 @@ end
 
 -- Open PoB's tattoo editor on node and hand its controls to use(); the "Show
 -- Legacy Tattoos" checkbox state is the Tree tab's (showLegacyTattoo).
-local function withTattooDialog(node, includeLegacy, use)
+--
+-- The editor opens on modGroups[treeTab.defaultTattoo[nodeName] or 1], an
+-- index its "Add" button stores per node name. An index taken from the longer
+-- legacy list points past the end of the normal list, and PoB then fails to
+-- open the editor for every node of that name (TreeTab.lua constructUI, also
+-- on the user's own right click in the desktop app). So the open starts from
+-- no stored index. keepPoBChoice: the call pressed Add or Reset Node, whose
+-- stored value is kept when it fits the normal list (Add from the normal list,
+-- or Reset's nil); otherwise the earlier value goes back.
+local function withTattooDialog(node, includeLegacy, use, keepPoBChoice)
   local treeTab = build.treeTab
+  local nodeName = build.spec.tree.nodes[node.id].dn
   local savedLegacy = treeTab.showLegacyTattoo
+  local savedDefault = treeTab.defaultTattoo[nodeName]
   treeTab.showLegacyTattoo = includeLegacy == true
+  treeTab.defaultTattoo[nodeName] = nil
   local res, err = withDialog(function() treeTab:ModifyNodePopup(node) end, function(popup)
     return use(popup.controls)
   end)
   treeTab.showLegacyTattoo = savedLegacy
+  local choice = treeTab.defaultTattoo[nodeName]
+  if not (res and keepPoBChoice) then
+    treeTab.defaultTattoo[nodeName] = savedDefault
+  elseif choice ~= nil and includeLegacy == true then
+    treeTab.defaultTattoo[nodeName] = nil
+  end
   return res, err
 end
 
@@ -2443,7 +2467,7 @@ function M.apply_tattoo(params)
     controls.modSelect.selIndex = idx
     controls.save.onClick()
     return { id = list[idx].id }
-  end)
+  end, true)
   if not res then return nil, tostring(dialogErr) end
   build.buildFlag = true
   M.advanceFrame()
@@ -2491,7 +2515,7 @@ function M.remove_tattoos(params)
     local res, dialogErr = withTattooDialog(node, true, function(controls)
       controls.reset.onClick()
       return true
-    end)
+    end, true)
     if not res then return nil, tostring(dialogErr) end
   end
   local left = snapshot()

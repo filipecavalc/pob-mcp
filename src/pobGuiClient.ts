@@ -15,7 +15,7 @@ import net from "node:net";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { readFile, unlink } from "node:fs/promises";
-import { PoBLuaApiClient, type LuaRequest, type LuaResponse, type SavedBuild } from "./pobLuaBridge.js";
+import { PoBLuaApiClient, type LuaRequest, type LuaResponse, type LuaSendOptions, type SavedBuild } from "./pobLuaBridge.js";
 import { atomicWriteFile } from "./utils/atomicWrite.js";
 
 const samePath = (a: string, b: string) => process.platform === "win32"
@@ -170,8 +170,9 @@ export class PoBGuiApiClient extends PoBLuaApiClient {
     return res.status as Record<string, unknown>;
   }
 
-  protected override send(obj: LuaRequest): Promise<LuaResponse> {
-    const run = this.queue.then(() => this.exchange(obj, this.gui.timeoutMs));
+  protected override send(obj: LuaRequest, options?: LuaSendOptions): Promise<LuaResponse> {
+    const timeoutMs = Math.max(this.gui.timeoutMs, options?.minTimeoutMs ?? 0);
+    const run = this.queue.then(() => this.exchange(obj, timeoutMs));
     this.queue = run.catch(() => undefined);
     return run;
   }

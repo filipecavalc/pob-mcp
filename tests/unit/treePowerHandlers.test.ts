@@ -6,9 +6,13 @@ import {
   formatPower, timelessParams,
 } from '../../src/handlers/treePowerHandlers.js';
 import { routeToolCall } from '../../src/server/toolRouter.js';
-import { getLuaToolSchemas } from '../../src/server/toolSchemas.js';
+import { getLuaToolSchemas, getOptimizationToolSchemas, getBuildGoalsToolSchemas } from '../../src/server/toolSchemas.js';
 import { shouldTruncate } from '../../src/server/responseUtils.js';
-import { PoBLuaApiClient } from '../../src/pobLuaBridge.js';
+import net from 'node:net';
+import os from 'node:os';
+import { mkdtempSync, writeFileSync } from 'fs';
+import { PoBLuaApiClient, NODE_POWER_TIMEOUT_MS } from '../../src/pobLuaBridge.js';
+import { PoBGuiApiClient } from '../../src/pobGuiClient.js';
 import type { NodePowerReport, TimelessOptions, TimelessSearchResult, TattooApplied, TattooList, TattoosRemoved } from '../../src/types/treePower.js';
 import { textOf } from '../helpers/response.js';
 
@@ -70,6 +74,25 @@ describe('get_node_power', () => {
     expect(text).not.toContain('Enemies Killed by your Hits are destroyed');
     expect(text).toContain('Way of the Warrior [38706] Notable: +80.0 (+0.10%) | anoint only');
     expect(text).not.toMatch(/anoint only \| /);
+  });
+
+  it('suggests other stats when the report is empty', async () => {
+    const { context } = fakeContext({ nodePower: report({ nodes: [], listed: 0 }) });
+    const text = textOf(await handleGetNodePower(context, { stat: 'FullDPS' }));
+    expect(text).toContain('No node changes Full DPS for this build');
+    expect(text).toContain('try stat CombinedDPS');
+  });
+
+  it('defaults to CombinedDPS in the description and points the heuristic tools to it', () => {
+    const tools = getLuaToolSchemas();
+    const nodePower = tools.find((t) => t.name === 'get_node_power')!;
+    expect(JSON.stringify(nodePower.inputSchema.properties?.stat)).toContain('default: CombinedDPS');
+    expect(nodePower.description).toContain('get_passive_upgrades');
+    expect(nodePower.description).toContain('max_depth');
+    const others = [...getOptimizationToolSchemas(), ...getBuildGoalsToolSchemas()]
+      .filter((t) => t.name === 'suggest_optimal_nodes' || t.name === 'get_passive_upgrades');
+    expect(others).toHaveLength(2);
+    for (const tool of others) expect(tool.description).toContain('get_node_power');
   });
 
   it('formats with the sidebar format PoB uses for the stat', () => {
@@ -208,12 +231,57 @@ describe('tattoos', () => {
 describe('Lua bridge actions', () => {
   class RecordingClient extends PoBLuaApiClient {
     sent: Array<{ action: string; params?: unknown }> = [];
+    sentOptions: Array<{ minTimeoutMs?: number } | undefined> = [];
     constructor(private reply: Record<string, unknown>) { super(); }
-    protected override async send(obj: { action: string; params?: unknown }) {
+    protected override async send(obj: { action: string; params?: unknown }, options?: { minTimeoutMs?: number }) {
       this.sent.push(obj);
+      this.sentOptions.push(options);
       return this.reply as never;
     }
   }
+
+  it('gives node_power alone a longer reply timeout (at least 180 s)', async () => {
+    const client = new RecordingClient({ ok: true, result: {} });
+    await client.nodePower({});
+    await client.listTattoos({ nodeId: 1 });
+    expect(NODE_POWER_TIMEOUT_MS).toBeGreaterThanOrEqual(180_000);
+    expect(client.sentOptions).toEqual([{ minTimeoutMs: NODE_POWER_TIMEOUT_MS }, undefined]);
+  });
+
+  it('lets node_power outlast the desktop client timeout, and only node_power', async () => {
+    // A stand-in for the desktop app's socket server that answers after 300 ms.
+    const deadlines: Record<string, number> = {};
+    const server = net.createServer((sock) => {
+      let buf = '';
+      sock.setEncoding('utf8');
+      sock.on('data', (chunk: string) => {
+        buf += chunk;
+        let i;
+        while ((i = buf.indexOf('\n')) >= 0) {
+          const req = JSON.parse(buf.slice(0, i));
+          buf = buf.slice(i + 1);
+          if (req.action === 'hello') { sock.write(JSON.stringify({ ok: true }) + '\n'); continue; }
+          deadlines[req.action] = req.deadline - Date.now();
+          setTimeout(() => { if (!sock.destroyed) sock.write(JSON.stringify({ ok: true, result: { stat: 'Life' } }) + '\n'); }, 300);
+        }
+      });
+      sock.on('error', () => undefined);
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'treepower-'));
+    const tokenFile = path.join(dir, 'pob-mcp-token.txt');
+    writeFileSync(tokenFile, 'tok\n');
+    const client = new PoBGuiApiClient({ tokenFile, port: (server.address() as net.AddressInfo).port, timeoutMs: 100 });
+    try {
+      await client.start();
+      await expect(client.nodePower({ stat: 'Life' })).resolves.toEqual({ stat: 'Life' });
+      expect(deadlines.node_power).toBeGreaterThan(NODE_POWER_TIMEOUT_MS - 5_000);
+      await expect(client.listTattoos({ nodeId: 1 })).rejects.toThrow('did not answer "list_tattoos" within 0 s');
+    } finally {
+      await client.stop().catch(() => undefined);
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
 
   it('sends each tree action and returns its result', async () => {
     const client = new RecordingClient({ ok: true, result: { marker: 1 } });
@@ -242,6 +310,9 @@ describe('Lua bridge actions', () => {
     expect(modifies).toContain('remove_tattoos = true');
     expect(modifies).not.toContain('node_power = true');
     expect(modifies).not.toContain('find_timeless_jewel = true');
+    // The finder and the tattoo list put back state a dialog the user has open may hold.
+    expect(server).toMatch(/local OPENS_DIALOG = \{ find_timeless_jewel = true, list_tattoos = true \}/);
+    expect(server).toContain('or OPENS_DIALOG[action]) and main.popups[1]');
   });
 });
 

@@ -1,14 +1,12 @@
 /**
- * Network side of Path of Building's build sharing and build archives.
+ * Network side of Path of Building's build sharing.
  *
- * PoB decides every URL, field and parsing rule in Lua: buildSites.websiteList
- * (Modules/BuildSiteTools.lua), ImportBuild (Modules/Common.lua) and
- * PoBArchivesProvider (Classes/PoBArchivesProvider.lua). The headless engine
- * has no HTTP client, so the requests those functions would make through
- * launch:DownloadPage and LaunchSubScript/lcurl run here instead, with the
- * same method, body and success rules.
+ * PoB decides every URL and field in Lua: buildSites.websiteList
+ * (Modules/BuildSiteTools.lua) and ImportBuild (Modules/Common.lua). The
+ * headless engine has no HTTP client, so the requests those functions would
+ * make through launch:DownloadPage and buildSites.UploadBuild (lcurl) run
+ * here instead, with the same method, body and success rules.
  */
-import zlib from "zlib";
 
 /** One entry of buildSites.websiteList (list_build_sites / resolve_build_link). */
 export interface BuildSite {
@@ -30,80 +28,26 @@ export type ResolvedBuildLink =
   | { kind: 'code' }
   | { kind: 'link'; link: string; downloadUrl: string; site?: BuildSite };
 
-/** archives_request result (M.archives_request). */
-export interface ArchivesRequest {
-  mode: 'builds' | 'similar';
-  list: string;
-  lists: string[];
-  url: string;
-  method: 'GET' | 'POST';
-  /** Prefix of the POST body, "importCode=" for Similar Builds. */
-  postField?: string;
-  pageUrl?: string;
-}
-
-/** One build as PoBArchivesProvider:ParseBuilds fills buildList. */
-export interface ArchiveBuild {
-  buildName?: string;
-  author?: string;
-  mainSkill?: string;
-  ascendancy?: string;
-  class?: string;
-  previewLink?: string;
-  buildLink?: string;
-  ehp?: number;
-  life?: number;
-  es?: number;
-  dps?: number;
-  version?: string;
-  metadata?: Array<{ key: string; value: unknown }>;
-}
-
-/** archives_parse result (M.archives_parse). */
-export interface ArchivesParseResult {
-  builds: ArchiveBuild[];
-  /** PoB's status line; set when no builds were found. */
-  statusMsg?: string;
-}
-
-/**
- * PoB's build code: zlib deflate of the build XML, base64 with '+' and '/'
- * swapped for '-' and '_' (ImportTab.lua "Generate":
- * common.base64.encode(Deflate(build:SaveDB("code"))):gsub("+","-"):gsub("/","_")).
- */
-export function encodeBuildCode(xml: string): string {
-  return zlib.deflateSync(Buffer.from(xml, 'utf8')).toString('base64').replace(/\+/g, '-').replace(/\//g, '_');
-}
-
-/** Reverse of encodeBuildCode (ImportTab.lua: Inflate(common.base64.decode(buf:gsub("-","+"):gsub("_","/")))). */
-export function decodeBuildCode(code: string): string {
-  const compressed = Buffer.from(code.trim().replace(/-/g, '+').replace(/_/g, '/'), 'base64');
-  let xml: string;
-  try {
-    xml = zlib.inflateSync(compressed).toString('utf8');
-  } catch (zlibErr) {
-    try {
-      xml = zlib.inflateRawSync(compressed).toString('utf8');
-    } catch {
-      throw new Error(`not a valid build code (${zlibErr instanceof Error ? zlibErr.message : String(zlibErr)})`);
-    }
-  }
-  if (!xml.trim()) throw new Error('not a valid build code (it decodes to nothing)');
-  return xml;
+interface FetchResponse {
+  status: number;
+  headers?: { get(name: string): string | null };
+  body?: { getReader(): { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<void> } } | null;
+  text(): Promise<string>;
 }
 
 type FetchLike = (url: string, init?: {
   method?: string;
   headers?: Record<string, string>;
   body?: string;
-  redirect?: 'follow' | 'manual';
-}) => Promise<{ status: number; headers?: { get(name: string): string | null }; text(): Promise<string> }>;
+  redirect?: 'follow';
+  signal?: AbortSignal;
+}) => Promise<FetchResponse>;
 
 /**
  * Cloudflare answers bots it challenges with 403 and "cf-mitigated: challenge".
  * The challenge needs a browser; it is reported, never worked around.
  */
-function challengeNote(response: { headers?: { get(name: string): string | null } }): string {
+function challengeNote(response: FetchResponse): string {
   return response.headers?.get('cf-mitigated') === 'challenge'
     ? ' (the site answered with a Cloudflare bot challenge, which only a browser can pass)'
     : '';
@@ -112,6 +56,10 @@ function challengeNote(response: { headers?: { get(name: string): string | null 
 export interface BuildSiteClientOptions {
   fetchImpl?: FetchLike;
   userAgent?: string;
+  /** Whole request, body included (default 15 s, as the poe.ninja client). */
+  timeoutMs?: number;
+  /** Largest response accepted (default 10 MB; build codes are far smaller). */
+  maxResponseBytes?: number;
 }
 
 export class BuildSiteError extends Error {
@@ -124,10 +72,14 @@ export class BuildSiteError extends Error {
 export class BuildSiteClient {
   private readonly fetchImpl: FetchLike;
   private readonly userAgent: string;
+  private readonly timeoutMs: number;
+  private readonly maxResponseBytes: number;
 
   constructor(options: BuildSiteClientOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? (fetch as unknown as FetchLike);
     this.userAgent = options.userAgent ?? 'pob-mcp-server/1.0';
+    this.timeoutMs = options.timeoutMs ?? 15_000;
+    this.maxResponseBytes = options.maxResponseBytes ?? 10 * 1024 * 1024;
   }
 
   /**
@@ -135,58 +87,88 @@ export class BuildSiteClient {
    * other than 200 or an empty body is an error.
    */
   async download(url: string): Promise<string> {
-    let response;
-    try {
-      response = await this.fetchImpl(url, { method: 'GET', headers: { 'User-Agent': this.userAgent }, redirect: 'follow' });
-    } catch (e) {
-      throw new BuildSiteError(`${url}: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    const body = await response.text();
+    const { response, body } = await this.request(url, { method: 'GET', headers: { 'User-Agent': this.userAgent } });
     if (response.status !== 200) throw new BuildSiteError(`${url}: Response code: ${response.status}${challengeNote(response)}`, response.status);
     if (body.length === 0) throw new BuildSiteError(`${url}: No data returned`, response.status);
     return body;
   }
 
   /**
-   * POST as buildSites.UploadBuild (BuildSiteTools.lua) and
-   * PoBArchivesProvider:GetRecommendations: curl OPT_POSTFIELDS with the
-   * body sent as given (form encoding, no escaping), success only on 200.
+   * POST as buildSites.UploadBuild (BuildSiteTools.lua): curl OPT_POSTFIELDS
+   * with the body sent as given (form encoding, no escaping), redirects
+   * followed, success only on 200.
    */
-  async post(url: string, body: string, followRedirects: boolean): Promise<string> {
-    let response;
-    try {
-      response = await this.fetchImpl(url, {
-        method: 'POST',
-        headers: { 'User-Agent': this.userAgent, 'Content-Type': 'application/x-www-form-urlencoded' },
-        body,
-        redirect: followRedirects ? 'follow' : 'manual',
-      });
-    } catch (e) {
-      throw new BuildSiteError(`${url}: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    const text = await response.text();
+  async post(url: string, body: string): Promise<string> {
+    const { response, body: text } = await this.request(url, {
+      method: 'POST',
+      headers: { 'User-Agent': this.userAgent, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
     if (response.status !== 200) {
       const challenge = challengeNote(response);
-      if (challenge) throw new BuildSiteError(`${url}: HTTP ${response.status}${challenge}`, response.status);
-      const detail = text.trim().slice(0, 300);
-      throw new BuildSiteError(`${url}: HTTP ${response.status}${detail ? `: ${detail}` : ''}`, response.status);
+      const detail = challenge ? '' : text.trim().slice(0, 300);
+      throw new BuildSiteError(`${url}: HTTP ${response.status}${challenge}${detail ? `: ${detail}` : ''}`, response.status);
     }
     return text;
   }
 
   /**
-   * buildSites.UploadBuild: POST postFields .. code to postUrl (following
-   * redirects); on 200 ImportTab's Share button shows codeOut .. response.
-   * The response is trimmed of surrounding whitespace.
+   * buildSites.UploadBuild: POST postFields .. code to postUrl; on 200
+   * ImportTab's Share button shows codeOut .. response. The response is
+   * trimmed of surrounding whitespace.
    */
   async uploadBuild(site: BuildSite, code: string): Promise<string> {
     if (!site.canShare || site.postUrl === undefined || site.postFields === undefined || site.codeOut === undefined) {
       throw new BuildSiteError(`${site.label} does not accept uploads in Path of Building`);
     }
-    const response = await this.post(site.postUrl, site.postFields + code, true);
+    const response = await this.post(site.postUrl, site.postFields + code);
     const id = response.trim();
     if (!id) throw new BuildSiteError(`${site.label} returned an empty response`);
     return site.codeOut + id;
+  }
+
+  private async request(url: string, init: { method: string; headers: Record<string, string>; body?: string }): Promise<{ response: FetchResponse; body: string }> {
+    const signal = AbortSignal.timeout(this.timeoutMs);
+    try {
+      const response = await this.fetchImpl(url, { ...init, redirect: 'follow', signal });
+      const declared = Number(response.headers?.get('content-length'));
+      if (Number.isFinite(declared) && declared > this.maxResponseBytes) throw this.tooLarge(url);
+      return { response, body: await this.readBody(url, response) };
+    } catch (e) {
+      if (e instanceof BuildSiteError) throw e;
+      const name = (e as { name?: string } | null)?.name;
+      if (name === 'TimeoutError' || name === 'AbortError' || signal.aborted) {
+        throw new BuildSiteError(`${url}: no complete answer within ${Math.round(this.timeoutMs / 1000)} s`);
+      }
+      throw new BuildSiteError(`${url}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  private tooLarge(url: string): BuildSiteError {
+    return new BuildSiteError(`${url}: response larger than ${Math.round(this.maxResponseBytes / 1024)} KB; not a build code`);
+  }
+
+  private async readBody(url: string, response: FetchResponse): Promise<string> {
+    const reader = response.body?.getReader();
+    if (!reader) {
+      const text = await response.text();
+      if (Buffer.byteLength(text, 'utf8') > this.maxResponseBytes) throw this.tooLarge(url);
+      return text;
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      size += value.byteLength;
+      if (size > this.maxResponseBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw this.tooLarge(url);
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks).toString('utf8');
   }
 }
 

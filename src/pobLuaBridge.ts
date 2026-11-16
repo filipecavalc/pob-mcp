@@ -2,12 +2,12 @@ import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import { noteIgnoredError } from './utils/errorHandling.js';
 import { EventEmitter } from "events";
 import path from "path";
-import zlib from "zlib";
 import fs from "fs/promises";
 import { randomUUID } from "crypto";
 import { atomicWriteFile } from "./utils/atomicWrite.js";
 import { resolvePoBLayout } from "./utils/pobLayout.js";
-import type { ArchivesParseResult, ArchivesRequest, BuildSite, ResolvedBuildLink } from "./services/buildSiteClient.js";
+import type { BuildSite, ResolvedBuildLink } from "./services/buildSiteClient.js";
+import { decodeBuildCode } from "./utils/buildCode.js";
 
 /** Lua bridge request envelope */
 // params is only ever serialised, so an interface with declared keys is as valid
@@ -698,19 +698,11 @@ export class PoBLuaApiClient {
    * host the desktop app links against, which headless mode has none of.
    */
   async importCode(code: string, name = "Imported Build"): Promise<BuildLoadResult> {
-    const b64 = code.trim().replace(/-/g, "+").replace(/_/g, "/");
-    const compressed = Buffer.from(b64, "base64");
-
     let xml: string;
     try {
-      xml = zlib.inflateSync(compressed).toString("utf8");
-    } catch (zlibErr) {
-      try {
-        xml = zlib.inflateRawSync(compressed).toString("utf8");
-      } catch {
-        const msg = zlibErr instanceof Error ? zlibErr.message : String(zlibErr);
-        throw new Error(`Failed to decode import code: ${msg}`);
-      }
+      xml = decodeBuildCode(code);
+    } catch (decodeErr) {
+      throw new Error(`Failed to decode import code: ${decodeErr instanceof Error ? decodeErr.message : String(decodeErr)}`);
     }
 
     return this.loadBuildXml(xml, name);
@@ -1001,7 +993,7 @@ async setTree(params: {
     this.proc = null;
   }
 
-  // Build sites (Modules/BuildSiteTools.lua) and PoB Archives (Classes/PoBArchivesProvider.lua).
+  // Build sites (Modules/BuildSiteTools.lua).
 
   async listBuildSites(): Promise<BuildSite[]> {
     const res = await this.send({ action: "list_build_sites" });
@@ -1014,20 +1006,6 @@ async setTree(params: {
     const res = await this.send({ action: "resolve_build_link", params: { link } });
     if (!res.ok) throw new Error(res.error || "resolve_build_link failed");
     return res.result as ResolvedBuildLink;
-  }
-
-  async archivesRequest(mode: 'builds' | 'similar', list?: string): Promise<ArchivesRequest> {
-    const res = await this.send({ action: "archives_request", params: { mode, list } });
-    if (!res.ok) throw new Error(res.error || "archives_request failed");
-    return res.result as ArchivesRequest;
-  }
-
-  async archivesParse(mode: 'builds' | 'similar', body: string): Promise<ArchivesParseResult> {
-    const res = await this.send({ action: "archives_parse", params: { mode, body } });
-    if (!res.ok) throw new Error(res.error || "archives_parse failed");
-    const result = res.result as Partial<ArchivesParseResult> | undefined;
-    // An empty Lua table serialises as {} rather than [].
-    return { builds: Array.isArray(result?.builds) ? result.builds : [], statusMsg: result?.statusMsg };
   }
 
   /** Loads a downloaded build as loadBuildXml does, and records the link it came from (build.importLink). */

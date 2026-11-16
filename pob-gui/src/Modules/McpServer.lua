@@ -40,10 +40,10 @@ local MODIFIES_BUILD = {
 local NO_BUILD_NEEDED = { ping = true, version = true, get_capabilities = true, gui_status = true,
   new_build = true, load_build_xml = true, open_build = true, show_panel = true,
   poe_api_status = true, poe_api_character = true }
--- Build sites and PoB Archives: link resolving and parsing need no build;
+-- Build sites: listing sites and resolving links need no build;
 -- loading a downloaded build replaces the open one.
 REPLACES_BUILD.load_imported_build = true
-for _, action in ipairs({ "list_build_sites", "resolve_build_link", "archives_request", "archives_parse", "load_imported_build" }) do
+for _, action in ipairs({ "list_build_sites", "resolve_build_link", "load_imported_build" }) do
   NO_BUILD_NEEDED[action] = true
 end
 -- Realm codes PoB's own login import uses (realmList in Classes/ImportTab.lua).

@@ -1,18 +1,13 @@
 import fs from "fs/promises";
+import { createHash } from "crypto";
 import { wrapHandler } from "../utils/errorHandling.js";
 import { buildFileName, resolveBuildFile } from "../utils/pathSanitizer.js";
+import { decodeBuildCode, encodeBuildCode } from "../utils/buildCode.js";
 import { buildPostLoadSummary, type LuaHandlerContext } from "./luaHandlers.js";
-import {
-  decodeBuildCode,
-  encodeBuildCode,
-  sharedBuildSiteClient,
-  type ArchiveBuild,
-  type BuildSite,
-  type BuildSiteClient,
-} from "../services/buildSiteClient.js";
+import { sharedBuildSiteClient, type BuildSite, type BuildSiteClient } from "../services/buildSiteClient.js";
 
 export interface BuildSourceDeps {
-  siteClient?: Pick<BuildSiteClient, 'download' | 'post' | 'uploadBuild'>;
+  siteClient?: Pick<BuildSiteClient, 'download' | 'uploadBuild'>;
   fileExists?: (filePath: string) => Promise<boolean>;
 }
 
@@ -97,82 +92,49 @@ export async function handleImportBuildLink(context: LuaHandlerContext, args: Im
   });
 }
 
-export interface ListArchiveBuildsArgs {
-  /** trending or latest (PoB's build list), or similar (Similar Builds of the loaded build). */
-  list?: string;
-  limit?: number;
-}
-
-const formatNumber = (value: unknown) => {
-  const n = Number(value);
-  return Number.isFinite(n) ? Math.round(n).toLocaleString('en-US') : '?';
-};
-
-export function formatArchiveBuild(build: ArchiveBuild, index: number): string[] {
-  const lines = [`[${index}] ${build.buildName ?? '(untitled)'}${build.author ? ` by ${build.author}` : ''}`];
-  const who = [build.ascendancy ?? build.class, build.mainSkill].filter((v) => v !== undefined && v !== '');
-  if (who.length || build.version) lines.push(`    ${who.join(' | ')}${build.version ? `${who.length ? ' | ' : ''}tree ${build.version}` : ''}`);
-  const stats = [`DPS ${formatNumber(build.dps ?? 0)}`, `Life ${formatNumber(build.life ?? 0)}`, `ES ${formatNumber(build.es ?? 0)}`, `EHP ${formatNumber(build.ehp ?? 0)}`];
-  for (const meta of build.metadata ?? []) stats.push(`${meta.key} ${String(meta.value)}`);
-  lines.push(`    ${stats.join(' | ')}`);
-  if (build.buildLink) lines.push(`    Link: ${build.buildLink}`);
-  if (build.previewLink) lines.push(`    Preview: ${build.previewLink}`);
-  return lines;
-}
-
-/**
- * PoB Archives (pobarchives.com) as PoB shows it: the build list's Trending
- * and Latest tabs (Modules/BuildList.lua) and the build's Similar Builds
- * popup (Modules/Build.lua OpenSimilarPopup), which posts the loaded build's
- * import code. URLs and parsing come from PoBArchivesProvider in Lua.
- */
-export async function handleListArchiveBuilds(context: LuaHandlerContext, args: ListArchiveBuildsArgs, deps: BuildSourceDeps = {}) {
-  return wrapHandler('list PoB Archives builds', async () => {
-    const list = (args.list ?? 'trending').trim().toLowerCase();
-    if (!['trending', 'latest', 'similar'].includes(list)) throw new Error('list must be trending, latest or similar');
-    const mode = list === 'similar' ? 'similar' as const : 'builds' as const;
-
-    await context.ensureLuaClient();
-    const luaClient = requireLuaClient(context);
-    const client = deps.siteClient ?? sharedBuildSiteClient();
-    const request = await luaClient.archivesRequest(mode, mode === 'builds' ? list : undefined);
-
-    let body: string;
-    let about = '';
-    if (request.method === 'POST') {
-      // Build.lua: SetImportCode(common.base64.encode(Deflate(self:SaveDB("code"))):gsub(...)).
-      const xml = await luaClient.exportBuildXml();
-      const info = await luaClient.getBuildInfo().catch(() => undefined);
-      body = await client.post(request.url, (request.postField ?? 'importCode=') + encodeBuildCode(xml), false);
-      about = ` for the loaded build${info?.name ? ` "${info.name}"` : ''}`;
-    } else {
-      body = await client.download(request.url);
-    }
-
-    const parsed = await luaClient.archivesParse(mode, body);
-    const limit = Math.min(Math.max(Math.floor(args.limit ?? 20), 1), 100);
-    const lines = [`PoB Archives, ${request.list}${about}:`];
-    if (parsed.builds.length === 0) {
-      lines.push(parsed.statusMsg ?? 'No builds found.');
-    } else {
-      parsed.builds.slice(0, limit).forEach((build, i) => lines.push(...formatArchiveBuild(build, i + 1)));
-      if (parsed.builds.length > limit) lines.push(`... ${parsed.builds.length - limit} more (raise limit to see them).`);
-      lines.push('', 'Import one with import_build_link and its Link.');
-    }
-    if (request.pageUrl) lines.push(`Full list on the site: ${request.pageUrl}`);
-    return { content: [{ type: "text" as const, text: lines.join('\n') }] };
-  });
-}
-
 export interface ShareBuildArgs {
   site?: string;
-  confirm?: boolean;
+  /** The hash a preview reported; the upload goes ahead only while the code still has it. */
+  confirmCodeHash?: string;
+}
+
+/** Short fingerprint of a build code, shown by the preview and required to upload. */
+export function codeHash(code: string): string {
+  return createHash('sha256').update(code).digest('hex').slice(0, 12);
+}
+
+const xmlAttr = (attrs: string, name: string) => attrs.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1];
+
+/**
+ * What the code carries besides the build itself: the Import section
+ * ImportTab:Save writes (realm, league, account and character hashes, import
+ * link), the notes and the item set names.
+ */
+export function describeSharedData(xml: string): string[] {
+  const lines: string[] = [];
+  const importAttrs = xml.match(/<Import\b([^>]*)>/)?.[1] ?? '';
+  const present: string[] = [];
+  const realm = xmlAttr(importAttrs, 'lastRealm');
+  const league = xmlAttr(importAttrs, 'lastLeague');
+  const link = xmlAttr(importAttrs, 'importLink');
+  if (realm) present.push(`realm ${realm}`);
+  if (league) present.push(`league ${league}`);
+  if (xmlAttr(importAttrs, 'lastAccountHash')) present.push('account name hash');
+  if (xmlAttr(importAttrs, 'lastCharacterHash')) present.push('character name hash');
+  if (link) present.push(`import link ${link}`);
+  lines.push(`- Import section: ${present.length ? present.join(', ') : 'nothing recorded'}`);
+  const notes = xml.match(/<Notes>([\s\S]*?)<\/Notes>/)?.[1]?.trim() ?? '';
+  lines.push(`- Notes: ${notes ? `${notes.length} characters` : 'none'}`);
+  const setTitles = [...xml.matchAll(/<ItemSet\b[^>]*\btitle="([^"]*)"/g)].map((m) => m[1]).filter(Boolean);
+  lines.push(`- Item set names: ${setTitles.length ? setTitles.join(', ') : 'none'}`);
+  return lines;
 }
 
 /**
  * Import/Export tab, "Generate" then "Share": the loaded build's code is
  * uploaded to the chosen site (buildSites.UploadBuild) and the link shown.
- * Uploads only with confirm: true; without it, reports what would be sent.
+ * Without confirm_code_hash it only previews, reporting the code's hash; the
+ * upload needs that hash and is refused when the build changed since.
  */
 export async function handleShareBuild(context: LuaHandlerContext, args: ShareBuildArgs, deps: BuildSourceDeps = {}) {
   return wrapHandler('share build', async () => {
@@ -187,20 +149,26 @@ export async function handleShareBuild(context: LuaHandlerContext, args: ShareBu
 
     const xml = await luaClient.exportBuildXml();
     const code = encodeBuildCode(xml);
+    const hash = codeHash(code);
     const info = await luaClient.getBuildInfo().catch(() => undefined);
     const what = `the loaded build${info?.name ? ` "${info.name}"` : ''}`;
 
-    if (args.confirm !== true) {
+    const confirm = args.confirmCodeHash?.trim().toLowerCase();
+    if (!confirm) {
       return {
         content: [{
           type: "text" as const,
           text: [
             `Not uploaded. share_build would publish ${what} to ${site.label}: a POST of its build code (${code.length} characters) to ${site.postUrl}.`,
-            'Anyone with the resulting link can open the build, including its notes and item set names.',
-            'Call share_build again with confirm: true to upload it.',
+            'Anyone with the resulting link can open the whole build file, including:',
+            ...describeSharedData(xml),
+            `Code hash: ${hash}. To upload exactly this code, call share_build again with confirm_code_hash: "${hash}".`,
           ].join('\n'),
         }],
       };
+    }
+    if (confirm !== hash) {
+      throw new Error(`confirm_code_hash "${args.confirmCodeHash}" does not match the loaded build's code (now ${hash}); the build changed since the preview or the hash is wrong. Nothing was uploaded; preview again.`);
     }
 
     const client = deps.siteClient ?? sharedBuildSiteClient();

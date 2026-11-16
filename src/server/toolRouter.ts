@@ -38,7 +38,7 @@ import { handleSuggestWatchersEye } from "../handlers/jewelAdvisorHandlers.js";
 import { handleSuggestCrafting } from "../handlers/craftingAdvisorHandler.js";
 import { handleFindItemUpgrades as handleFindItemUpgradesNew } from "../handlers/itemShoppingHandler.js";
 import { handleClassifyItemAffixes, handleListCraftableMods, handleFindAffixTiers } from "../handlers/affixHandlers.js";
-import { handleImportBuildLink, handleListArchiveBuilds, handleShareBuild } from "../handlers/buildSourceHandlers.js";
+import { handleImportBuildLink, handleShareBuild } from "../handlers/buildSourceHandlers.js";
 
 export interface ToolRouterDependencies {
   contextBuilder: ContextBuilder;
@@ -848,16 +848,10 @@ export async function routeToolCall(
         overwrite: args?.overwrite === true,
       });
 
-    case "list_archive_builds":
-      return await handleListArchiveBuilds(luaContext, {
-        list: args?.list as string | undefined,
-        limit: args?.limit === undefined ? undefined : Number(args.limit),
-      });
-
     case "share_build":
       return await handleShareBuild(luaContext, {
         site: args?.site as string | undefined,
-        confirm: args?.confirm === true,
+        confirmCodeHash: args?.confirm_code_hash as string | undefined,
       });
 
     default:

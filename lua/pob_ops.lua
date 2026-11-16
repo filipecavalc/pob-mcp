@@ -1777,7 +1777,7 @@ function M.import_character(params)
 end
 
 -- ---------------------------------------------------------------------------
--- Build sites and build archives
+-- Build sites
 -- PoB's own tables and functions decide links, URLs and parsing; only the
 -- network requests run in TS (the headless engine has no HTTP client).
 -- ---------------------------------------------------------------------------
@@ -1847,10 +1847,12 @@ function M.resolve_build_link(params)
   if not seen.called then return { kind = 'code' } end
   local link = isUri and seen.importLink or seen.link
   local site = seen.site
-  if not site and link then
-    -- DownloadBuild found the site by its id; name it from the https link.
+  if not site and isUri then
+    -- DownloadBuild(uri, nil) picks the first site whose id the URI names,
+    -- with this pattern; the link it stores can name another site's page
+    -- (PastebinP's linkURL is pastebin.com), so the site comes from the id.
     for _, info in ipairs(buildSites.websiteList) do
-      if link:match(info.matchURL) then site = info break end
+      if input:match("^pob:[/\\]*" .. info.id:lower() .. "[/\\]+(.+)") then site = info break end
     end
   end
   if not seen.url then
@@ -1862,50 +1864,6 @@ function M.resolve_build_link(params)
     downloadUrl = seen.url,
     site = site and describeBuildSite(site) or nil,
   }
-end
-
--- PoB Archives (Classes/PoBArchivesProvider.lua, base Classes/ExtBuildListProvider.lua).
--- mode 'builds' has the lists Trending and Latest (Modules/BuildList.lua);
--- mode 'similar' has Similar Builds (Modules/Build.lua OpenSimilarPopup),
--- which posts the build's import code. Returns PoB's own request details.
-function M.archives_request(params)
-  local mode = params.mode == 'similar' and 'similar' or 'builds'
-  local ok, provider = pcall(Compat.construct, 'PoBArchivesProvider', mode)
-  if not ok then return nil, 'PoBArchivesProvider unavailable: ' .. tostring(provider) end
-  local titles = provider:GetListTitles()
-  local list = params.list or titles[1]
-  local known = false
-  for _, title in ipairs(titles) do
-    if title:lower() == tostring(list):lower() then list, known = title, true end
-  end
-  if not known then return nil, 'unknown list "' .. tostring(list) .. '"; PoB Archives offers: ' .. table.concat(titles, ', ') end
-  -- SetActiveList would call GetBuilds (the download); set the list directly.
-  provider.activeList = list
-  if mode == 'similar' then
-    -- The code itself is sent by TS; any non-nil value selects the recommendations API.
-    provider:SetImportCode('')
-  end
-  return {
-    mode = mode,
-    list = list,
-    lists = titles,
-    url = provider:GetApiUrl(),
-    method = mode == 'similar' and 'POST' or 'GET',
-    -- PoBArchivesProvider:GetRecommendations posts "importCode=" .. code.
-    postField = mode == 'similar' and 'importCode=' or nil,
-    pageUrl = provider:GetPageUrl(),
-  }
-end
-
--- Parse an archives API response with PoBArchivesProvider:ParseBuilds.
-function M.archives_parse(params)
-  if type(params.body) ~= 'string' then return nil, 'body is required' end
-  local mode = params.mode == 'similar' and 'similar' or 'builds'
-  local ok, provider = pcall(Compat.construct, 'PoBArchivesProvider', mode)
-  if not ok then return nil, 'PoBArchivesProvider unavailable: ' .. tostring(provider) end
-  local parsed, err = pcall(provider.ParseBuilds, provider, params.body)
-  if not parsed then return nil, 'PoB could not parse the archives response: ' .. tostring(err) end
-  return { builds = provider.buildList, statusMsg = provider.statusMsg }
 end
 
 return M

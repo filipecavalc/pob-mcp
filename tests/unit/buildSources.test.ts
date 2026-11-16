@@ -1,9 +1,18 @@
 import { describe, it, expect, jest } from '@jest/globals';
 import zlib from 'zlib';
-import { BuildSiteClient, decodeBuildCode, encodeBuildCode, type BuildSite } from '../../src/services/buildSiteClient.js';
-import { handleImportBuildLink, handleListArchiveBuilds, handleShareBuild, formatArchiveBuild } from '../../src/handlers/buildSourceHandlers.js';
+import { BuildSiteClient, type BuildSite } from '../../src/services/buildSiteClient.js';
+import { decodeBuildCode, encodeBuildCode } from '../../src/utils/buildCode.js';
+import { handleImportBuildLink, handleShareBuild, codeHash, describeSharedData } from '../../src/handlers/buildSourceHandlers.js';
 
 const XML = '<?xml version="1.0" encoding="UTF-8"?>\n<PathOfBuilding><Build level="90" className="Marauder"/></PathOfBuilding>';
+const XML_WITH_IMPORT = [
+  '<PathOfBuilding>',
+  '<Build level="90" className="Marauder"/>',
+  '<Import lastRealm="PC" lastLeague="Settlers" lastAccountHash="abc123" lastCharacterHash="def456" importLink="https://pobb.in/xyz"/>',
+  '<Notes>Gear notes here</Notes>',
+  '<Items><ItemSet id="1" title="Leveling"/><ItemSet id="2" title="Endgame"/></Items>',
+  '</PathOfBuilding>',
+].join('\n');
 
 const POBBIN: BuildSite = {
   label: 'pobb.in', id: 'POBBin', matchURL: '^https://pobb%.in/.+', regexURL: 'pobb%.in/(.+)%s*$', downloadURL: 'pobb.in/pob/%1',
@@ -14,15 +23,16 @@ const NINJA: BuildSite = {
 };
 const PASTEBIN: BuildSite = { label: 'Pastebin.com', id: 'pastebin', downloadURL: 'pastebin.com/raw/%1', canShare: false };
 
-type Call = { url: string; init?: { method?: string; headers?: Record<string, string>; body?: string; redirect?: string } };
+type Init = { method?: string; headers?: Record<string, string>; body?: string; redirect?: string; signal?: AbortSignal };
+type Call = { url: string; init?: Init };
 
-function fakeFetch(responses: Array<{ status: number; body: string }>) {
+function fakeFetch(responses: Array<{ status: number; body: string; headers?: Record<string, string> }>) {
   const calls: Call[] = [];
-  const impl = async (url: string, init?: Call['init']) => {
+  const impl = async (url: string, init?: Init) => {
     calls.push({ url, init });
     const next = responses.shift();
     if (!next) throw new Error('unexpected request');
-    return { status: next.status, text: async () => next.body };
+    return { status: next.status, headers: { get: (n: string) => next.headers?.[n.toLowerCase()] ?? null }, text: async () => next.body };
   };
   return { calls, impl };
 }
@@ -46,8 +56,6 @@ function makeLua(overrides: Record<string, unknown> = {}) {
     saveBuild: jest.fn(async (p: string) => ({ path: p, size: 123 })),
     exportBuildXml: jest.fn(async () => XML),
     getBuildInfo: jest.fn(async () => ({ name: 'RF test', level: 90 })),
-    archivesRequest: jest.fn(async () => ({})),
-    archivesParse: jest.fn(async () => ({ builds: [] })),
     // Read by the post-load summary.
     listSpecs: jest.fn(async () => ({ specs: [] })),
     listItemSets: jest.fn(async () => ({ itemSets: [] })),
@@ -65,19 +73,22 @@ describe('build codes', () => {
     expect(decodeBuildCode(`  ${code}\n`)).toBe(XML);
   });
 
-  it('rejects text that is not a code', () => {
-    expect(() => decodeBuildCode('hello world')).toThrow(/not a valid build code/);
+  it('accepts raw deflate and rejects text that is not a code', () => {
+    const raw = zlib.deflateRawSync(Buffer.from(XML)).toString('base64');
+    expect(decodeBuildCode(raw)).toBe(XML);
+    expect(() => decodeBuildCode('hello world')).toThrow();
+    expect(() => decodeBuildCode(encodeBuildCode('   '))).toThrow('decodes to nothing');
   });
 });
 
 describe('BuildSiteClient', () => {
-  it('downloads with a GET that follows redirects', async () => {
+  it('downloads with a GET that follows redirects, under a timeout', async () => {
     const f = fakeFetch([{ status: 200, body: 'CODE\n' }]);
     const client = new BuildSiteClient({ fetchImpl: f.impl });
     await expect(client.download('https://pobb.in/pob/abc')).resolves.toBe('CODE\n');
-    expect(f.calls[0].init?.method).toBe('GET');
-    expect(f.calls[0].init?.redirect).toBe('follow');
+    expect(f.calls[0].init).toMatchObject({ method: 'GET', redirect: 'follow' });
     expect(f.calls[0].init?.headers?.['User-Agent']).toBe('pob-mcp-server/1.0');
+    expect(f.calls[0].init?.signal).toBeInstanceOf(AbortSignal);
   });
 
   it('treats a non-200 status or an empty body as a failure, like launch:DownloadPage', async () => {
@@ -86,15 +97,47 @@ describe('BuildSiteClient', () => {
     await expect(client.download('https://x/2')).rejects.toThrow('No data returned');
   });
 
-  it('names a Cloudflare bot challenge instead of passing it', async () => {
-    const challenged = async () => ({
-      status: 403,
-      headers: { get: (name: string) => (name === 'cf-mitigated' ? 'challenge' : null) },
-      text: async () => '<html>Just a moment...</html>',
+  it('gives up when the site does not answer in time', async () => {
+    const hang = (_url: string, init?: Init) => new Promise<never>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'TimeoutError' })));
     });
-    const client = new BuildSiteClient({ fetchImpl: challenged });
-    await expect(client.download('https://pobarchives.com/api/builds?q=trending')).rejects.toThrow('Response code: 403 (the site answered with a Cloudflare bot challenge');
-    await expect(client.post('https://pobarchives.com/api/recommendations', 'importCode=x', false)).rejects.toThrow('HTTP 403 (the site answered with a Cloudflare bot challenge');
+    const client = new BuildSiteClient({ fetchImpl: hang, timeoutMs: 20 });
+    await expect(client.download('https://pobb.in/pob/slow')).rejects.toThrow('https://pobb.in/pob/slow: no complete answer within 0 s');
+  });
+
+  it('refuses responses over the size cap, by header or by body', async () => {
+    const big = fakeFetch([
+      { status: 200, body: 'x', headers: { 'content-length': '5000' } },
+      { status: 200, body: 'y'.repeat(2000) },
+    ]);
+    const client = new BuildSiteClient({ fetchImpl: big.impl, maxResponseBytes: 1024 });
+    await expect(client.download('https://a/1')).rejects.toThrow('response larger than 1 KB');
+    await expect(client.download('https://a/2')).rejects.toThrow('response larger than 1 KB');
+  });
+
+  it('stops reading a streamed body once it passes the cap', async () => {
+    const cancel = jest.fn(async () => undefined);
+    let reads = 0;
+    const streamed = async () => ({
+      status: 200,
+      headers: { get: () => null },
+      body: { getReader: () => ({ read: async () => { reads++; return { done: false, value: new Uint8Array(600) }; }, cancel }) },
+      text: async () => '',
+    });
+    const client = new BuildSiteClient({ fetchImpl: streamed, maxResponseBytes: 1024 });
+    await expect(client.download('https://a/stream')).rejects.toThrow('response larger than 1 KB');
+    expect(reads).toBe(2);
+    expect(cancel).toHaveBeenCalled();
+  });
+
+  it('names a Cloudflare bot challenge instead of passing it', async () => {
+    const f = fakeFetch([
+      { status: 403, body: '<html>Just a moment...</html>', headers: { 'cf-mitigated': 'challenge' } },
+      { status: 403, body: '<html>Just a moment...</html>', headers: { 'cf-mitigated': 'challenge' } },
+    ]);
+    const client = new BuildSiteClient({ fetchImpl: f.impl });
+    await expect(client.download('https://site/a')).rejects.toThrow('Response code: 403 (the site answered with a Cloudflare bot challenge');
+    await expect(client.post('https://site/b', 'x')).rejects.toThrow(/HTTP 403 \(the site answered with a Cloudflare bot challenge[^:]*$/);
   });
 
   it('uploads postFields followed by the code and returns codeOut plus the response', async () => {
@@ -174,84 +217,51 @@ describe('import_build_link', () => {
   });
 });
 
-describe('list_archive_builds', () => {
-  const archiveBuild = {
-    buildName: 'RF Chieftain', author: 'someone', mainSkill: 'Righteous Fire', ascendancy: 'Chieftain', class: 'Marauder',
-    previewLink: 'https://pobarchives.com/build/u1', buildLink: 'https://pobb.in/x1', ehp: 81234.4, life: 6000, es: 0, dps: 1234567.8, version: '3_26',
-  };
-
-  it('downloads Trending from the URL PoB gives and lists what PoB parsed', async () => {
-    const lua = makeLua({
-      archivesRequest: jest.fn(async () => ({ mode: 'builds', list: 'Trending', lists: ['Trending', 'Latest'], url: 'https://pobarchives.com/api/builds?q=trending', method: 'GET', pageUrl: 'https://pobarchives.com/builds/7U8QXU8m?sort=popularity' })),
-      archivesParse: jest.fn(async () => ({ builds: [archiveBuild, { ...archiveBuild, buildName: 'Second' }] })),
-    });
-    const download = jest.fn(async () => '{"builds":[]}');
-    const res = await handleListArchiveBuilds(makeContext(lua), { limit: 1 }, { siteClient: { download } as never });
-    expect(lua.archivesRequest).toHaveBeenCalledWith('builds', 'trending');
-    expect(download).toHaveBeenCalledWith('https://pobarchives.com/api/builds?q=trending');
-    expect(lua.archivesParse).toHaveBeenCalledWith('builds', '{"builds":[]}');
-    const out = text(res);
-    expect(out).toContain('[1] RF Chieftain by someone');
-    expect(out).toContain('Chieftain | Righteous Fire | tree 3_26');
-    expect(out).toContain('DPS 1,234,568 | Life 6,000 | ES 0 | EHP 81,234');
-    expect(out).toContain('Link: https://pobb.in/x1');
-    expect(out).toContain('1 more');
-    expect(out).not.toContain('Second');
-  });
-
-  it("posts the loaded build's code for Similar Builds", async () => {
-    const lua = makeLua({
-      archivesRequest: jest.fn(async () => ({ mode: 'similar', list: 'Similar Builds', lists: ['Similar Builds'], url: 'https://pobarchives.com/api/recommendations', method: 'POST', postField: 'importCode=' })),
-      archivesParse: jest.fn(async () => ({ builds: [{ ...archiveBuild, metadata: [{ key: 'Match Score', value: 0.87 }] }] })),
-    });
-    const post = jest.fn(async () => '{}');
-    const res = await handleListArchiveBuilds(makeContext(lua), { list: 'similar' }, { siteClient: { post } as never });
-    expect(lua.archivesRequest).toHaveBeenCalledWith('similar', undefined);
-    expect(post).toHaveBeenCalledWith('https://pobarchives.com/api/recommendations', 'importCode=' + encodeBuildCode(XML), false);
-    expect(text(res)).toContain('Similar Builds for the loaded build "RF test"');
-    expect(text(res)).toContain('Match Score 0.87');
-  });
-
-  it("shows PoB's status message when nothing was found, and rejects unknown lists", async () => {
-    const lua = makeLua({
-      archivesRequest: jest.fn(async () => ({ mode: 'builds', list: 'Latest', lists: [], url: 'u', method: 'GET' })),
-      archivesParse: jest.fn(async () => ({ builds: [], statusMsg: 'No builds found.' })),
-    });
-    const res = await handleListArchiveBuilds(makeContext(lua), { list: 'Latest' }, { siteClient: { download: async () => '{}' } as never });
-    expect(text(res)).toContain('No builds found.');
-    await expect(handleListArchiveBuilds(makeContext(lua), { list: 'popular' })).rejects.toThrow('list must be trending, latest or similar');
-  });
-
-  it('formats a build with missing fields', () => {
-    expect(formatArchiveBuild({}, 3)).toEqual(['[3] (untitled)', '    DPS 0 | Life 0 | ES 0 | EHP 0']);
-  });
-});
-
 describe('share_build', () => {
-  it('uploads nothing without confirm', async () => {
-    const lua = makeLua();
+  it('previews without uploading: what the code carries and its hash', async () => {
+    const lua = makeLua({ exportBuildXml: jest.fn(async () => XML_WITH_IMPORT) });
     const uploadBuild = jest.fn();
-    const res = await handleShareBuild(makeContext(lua), { site: 'pobb.in' }, { siteClient: { uploadBuild } as never });
+    const out = text(await handleShareBuild(makeContext(lua), { site: 'pobb.in' }, { siteClient: { uploadBuild } as never }));
     expect(uploadBuild).not.toHaveBeenCalled();
-    expect(text(res)).toContain('Not uploaded');
-    expect(text(res)).toContain('to pobb.in: a POST of its build code');
-    expect(text(res)).toContain('https://pobb.in/pob/');
+    expect(out).toContain('Not uploaded');
+    expect(out).toContain('to pobb.in: a POST of its build code');
+    expect(out).toContain('https://pobb.in/pob/');
+    expect(out).toContain('- Import section: realm PC, league Settlers, account name hash, character name hash, import link https://pobb.in/xyz');
+    expect(out).toContain('- Notes: 15 characters');
+    expect(out).toContain('- Item set names: Leveling, Endgame');
+    const hash = codeHash(encodeBuildCode(XML_WITH_IMPORT));
+    expect(hash).toMatch(/^[0-9a-f]{12}$/);
+    expect(out).toContain(`confirm_code_hash: "${hash}"`);
   });
 
-  it("uploads the loaded build's code with confirm and returns the link", async () => {
+  it('uploads the previewed code when given its hash, and returns the link', async () => {
     const lua = makeLua();
     const uploadBuild = jest.fn(async () => 'https://pobb.in/Ab12');
-    const res = await handleShareBuild(makeContext(lua), { site: 'pobbin', confirm: true }, { siteClient: { uploadBuild } as never });
+    const hash = codeHash(encodeBuildCode(XML));
+    const res = await handleShareBuild(makeContext(lua), { site: 'pobbin', confirmCodeHash: hash.toUpperCase() }, { siteClient: { uploadBuild } as never });
     expect(uploadBuild).toHaveBeenCalledWith(POBBIN, encodeBuildCode(XML));
     expect(text(res)).toContain('Shared the loaded build "RF test" on pobb.in: https://pobb.in/Ab12');
+  });
+
+  it('refuses when the loaded build changed since the preview', async () => {
+    const lua = makeLua();
+    const uploadBuild = jest.fn();
+    const staleHash = codeHash(encodeBuildCode(XML_WITH_IMPORT));
+    await expect(handleShareBuild(makeContext(lua), { site: 'pobb.in', confirmCodeHash: staleHash }, { siteClient: { uploadBuild } as never }))
+      .rejects.toThrow(`does not match the loaded build's code (now ${codeHash(encodeBuildCode(XML))})`);
+    expect(uploadBuild).not.toHaveBeenCalled();
   });
 
   it('only offers the sites PoB shares to', async () => {
     const lua = makeLua();
     const uploadBuild = jest.fn();
-    await expect(handleShareBuild(makeContext(lua), { site: 'pastebin', confirm: true }, { siteClient: { uploadBuild } as never }))
+    await expect(handleShareBuild(makeContext(lua), { site: 'pastebin', confirmCodeHash: 'abc' }, { siteClient: { uploadBuild } as never }))
       .rejects.toThrow('"pastebin" is not a site Path of Building shares to. Choose one of: pobb.in (POBBin), PoeNinja (PoeNinja).');
     await expect(handleShareBuild(makeContext(lua), {})).rejects.toThrow('site is required');
     expect(uploadBuild).not.toHaveBeenCalled();
+  });
+
+  it('describes a build with no Import data, notes or item sets', () => {
+    expect(describeSharedData(XML)).toEqual(['- Import section: nothing recorded', '- Notes: none', '- Item set names: none']);
   });
 });

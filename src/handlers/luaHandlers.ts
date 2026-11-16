@@ -101,7 +101,7 @@ export async function handleLuaSaveBuild(context: LuaHandlerContext, buildName: 
  * Post-load summary shared by every "a build just got loaded into the Lua
  * bridge" handler: spec/item-set counts, core stats, and top issues.
  */
-async function buildPostLoadSummary(context: LuaHandlerContext, luaClient: PoBLuaApiClient, name?: string): Promise<string> {
+export async function buildPostLoadSummary(context: LuaHandlerContext, luaClient: PoBLuaApiClient, name?: string): Promise<string> {
     // Check for multiple specs / item sets and inform the user (sequential — bridge is single-request)
     const extraLines: string[] = [];
     try {

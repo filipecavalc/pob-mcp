@@ -549,6 +549,16 @@ name returned by `get_leagues` when Trade is enabled, or use `Standard` explicit
 | `search_cluster_jewels` | Search for cluster jewels by notable |
 | `generate_shopping_list` | Generate a prioritized shopping list from build analysis |
 
+### Build Links and Sharing (Lua Bridge)
+
+These follow Path of Building's own code: the site list and link patterns come
+from PoB's `Modules/BuildSiteTools.lua`. Only the HTTP requests run in the server.
+
+| Tool | Description |
+|---|---|
+| `import_build_link` | Import a build from a pobb.in, poe.ninja, Maxroll, pob.codes, Pastebin, Rentry or poedb link (or a `pob://` link, or a plain code), as the Import/Export tab does; optional `save_as` (no overwrite without `overwrite: true`) |
+| `share_build` | Upload the loaded build to a site PoB shares to and return the link, as the "Share" button; a preview lists what the code carries and its hash, and the upload needs `confirm_code_hash` from that preview |
+
 ---
 
 ## Typical Workflows

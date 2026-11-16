@@ -1776,4 +1776,94 @@ function M.import_character(params)
   }
 end
 
+-- ---------------------------------------------------------------------------
+-- Build sites
+-- PoB's own tables and functions decide links, URLs and parsing; only the
+-- network requests run in TS (the headless engine has no HTTP client).
+-- ---------------------------------------------------------------------------
+
+local BUILD_SITE_FIELDS = { 'label', 'id', 'matchURL', 'regexURL', 'downloadURL', 'codeOut', 'postUrl', 'postFields', 'linkURL' }
+
+local function describeBuildSite(site)
+  local out = {}
+  for _, key in ipairs(BUILD_SITE_FIELDS) do out[key] = site[key] end
+  -- ImportTab.lua getExportSitesFromImportList: a site offers "Share" when it
+  -- has postUrl, postFields and codeOut.
+  out.canShare = (site.postUrl and site.postFields and site.codeOut) and true or false
+  return out
+end
+
+-- buildSites.websiteList (Modules/BuildSiteTools.lua, loaded by Modules/Main.lua).
+function M.list_build_sites()
+  if type(buildSites) ~= 'table' or type(buildSites.websiteList) ~= 'table' then
+    return nil, "PoB's buildSites (Modules/BuildSiteTools.lua) is not loaded"
+  end
+  local sites = {}
+  for _, site in ipairs(buildSites.websiteList) do table.insert(sites, describeBuildSite(site)) end
+  return { sites = sites }
+end
+
+-- Resolve an import link to the URL PoB downloads its build code from, by
+-- running PoB's own code with its download step intercepted:
+--   https links: ImportBuild (Modules/Common.lua), which trims the input,
+--     unwraps youtube/google redirect links, matches buildSites.websiteList
+--     and calls buildSites.DownloadBuild (regexURL -> downloadURL);
+--   pob:// links: Main:Init's protocol handler (Modules/Main.lua), which
+--     calls buildSites.DownloadBuild(uri, nil) and
+--     buildSites.ParseImportLinkFromURI for the link it stores.
+-- Anything else is treated as a build code, as ImportBuild does.
+function M.resolve_build_link(params)
+  local input = params.link
+  if type(input) ~= 'string' or input == '' then return nil, 'link is required' end
+  if type(buildSites) ~= 'table' or type(buildSites.DownloadBuild) ~= 'function' then
+    return nil, "PoB's buildSites (Modules/BuildSiteTools.lua) is not loaded"
+  end
+  if type(ImportBuild) ~= 'function' or type(launch) ~= 'table' then
+    return nil, "PoB's ImportBuild (Modules/Common.lua) is not loaded"
+  end
+  local seen = {}
+  local origDownloadBuild = buildSites.DownloadBuild
+  local rawDownloadPage = rawget(launch, 'DownloadPage')
+  buildSites.DownloadBuild = function(link, websiteInfo, callback)
+    seen.called, seen.link, seen.site = true, link, websiteInfo
+    return origDownloadBuild(link, websiteInfo, callback)
+  end
+  launch.DownloadPage = function(_, url) seen.url = url end
+  local isUri = input:match('^pob:') ~= nil
+  local ok, err = pcall(function()
+    if isUri then
+      seen.importLink = buildSites.ParseImportLinkFromURI(input)
+      buildSites.DownloadBuild(input, nil, function() end)
+    else
+      -- ImportBuild decodes the input as a code when no site matches; that
+      -- result is discarded here (TS decodes codes itself).
+      ImportBuild(input, function() end)
+    end
+  end)
+  buildSites.DownloadBuild = origDownloadBuild
+  rawset(launch, 'DownloadPage', rawDownloadPage)
+  if not ok then return nil, 'resolving the link failed: ' .. tostring(err) end
+
+  if not seen.called then return { kind = 'code' } end
+  local link = isUri and seen.importLink or seen.link
+  local site = seen.site
+  if not site and isUri then
+    -- DownloadBuild(uri, nil) picks the first site whose id the URI names,
+    -- with this pattern; the link it stores can name another site's page
+    -- (PastebinP's linkURL is pastebin.com), so the site comes from the id.
+    for _, info in ipairs(buildSites.websiteList) do
+      if input:match("^pob:[/\\]*" .. info.id:lower() .. "[/\\]+(.+)") then site = info break end
+    end
+  end
+  if not seen.url then
+    return nil, 'no site in PoB\'s list matches "' .. tostring(link or input) .. '" (Download information not found)'
+  end
+  return {
+    kind = 'link',
+    link = link,
+    downloadUrl = seen.url,
+    site = site and describeBuildSite(site) or nil,
+  }
+end
+
 return M

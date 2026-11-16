@@ -1148,6 +1148,8 @@ export interface SkillSetEntry {
 export interface SkillSetList {
   skillSets: SkillSetEntry[];
   activeSkillSetId: number;
+  /** select_* on the set already active: nothing was done. */
+  unchanged?: boolean;
   created?: number;
   deleted?: { id: number; title: string };
 }
@@ -1163,6 +1165,8 @@ export interface ConfigSetEntry {
 export interface ConfigSetList {
   configSets: ConfigSetEntry[];
   activeConfigSetId: number;
+  /** select_* on the set already active: nothing was done. */
+  unchanged?: boolean;
   created?: number;
   deleted?: { id: number; title: string };
 }

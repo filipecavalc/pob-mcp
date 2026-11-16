@@ -1856,11 +1856,18 @@ function M.rank_gems_by_dps(params)
     showLegacyGems = skillsTab.showLegacyGems, defaultGemLevel = skillsTab.defaultGemLevel,
     defaultGemQuality = skillsTab.defaultGemQuality,
   }
-  -- CalcOutputWithThisGem puts each candidate into the slot and puts the old
-  -- gem back after the calculation; keep what was there in case one fails.
-  local gemSnapshot, slotGem = {}, group.gemList[slotIndex]
-  for i, gem in ipairs(group.gemList) do gemSnapshot[i] = gem end
-  local slotState = slotGem and { gemData = slotGem.gemData, level = slotGem.level, displayEffect = slotGem.displayEffect }
+  -- CalcOutputWithThisGem puts each candidate into the slot's gem table and
+  -- restores only gemData, level and displayEffect. The calculation also writes
+  -- per-skill choices onto the instances it runs (skillPart, skillMinion, ...),
+  -- so an active candidate leaves such fields on the gem it replaced. Keep the
+  -- group, its gem list and every gem's fields, and put them back afterwards.
+  local function fieldsOf(t) local copy = {} for k, v in pairs(t) do copy[k] = v end return copy end
+  local function restoreFields(t, copy)
+    for k in pairs(t) do if copy[k] == nil then t[k] = nil end end
+    for k, v in pairs(copy) do t[k] = v end
+  end
+  local groupFields, gemTables, gemFields = fieldsOf(group), {}, {}
+  for i, gem in ipairs(group.gemList) do gemTables[i], gemFields[i] = gem, fieldsOf(gem) end
   local ok, result = pcall(function()
     -- GemSelectControl reads the group from skillsTab.displayGroup (SetDisplayGroup
     -- sets it; the rest of SetDisplayGroup only refills the tab's edit boxes).
@@ -1949,12 +1956,13 @@ function M.rank_gems_by_dps(params)
     }
   end)
   for key, value in pairs(saved) do skillsTab[key] = value end
-  if not ok then
-    for i = #group.gemList, 1, -1 do group.gemList[i] = nil end
-    for i, gem in ipairs(gemSnapshot) do group.gemList[i] = gem end
-    if slotGem then slotGem.gemData, slotGem.level, slotGem.displayEffect = slotState.gemData, slotState.level, slotState.displayEffect end
-    return nil, 'gem ranking failed: ' .. tostring(result)
+  restoreFields(group, groupFields)
+  for i = #group.gemList, 1, -1 do group.gemList[i] = nil end
+  for i, gem in ipairs(gemTables) do
+    restoreFields(gem, gemFields[i])
+    group.gemList[i] = gem
   end
+  if not ok then return nil, 'gem ranking failed: ' .. tostring(result) end
   return result
 end
 
@@ -2003,6 +2011,12 @@ function M.select_skill_set(params)
   if not build or not build.skillsTab then return nil, 'skills not initialized' end
   local set, id = skillSetById(type(params) == 'table' and params.id)
   if not set then return nil, 'skill set id ' .. tostring(params and params.id) .. ' not found (see list_skill_sets)' end
+  -- OnSelClick does nothing for the set already active.
+  if id == build.skillsTab.activeSkillSetId then
+    local list = M.list_skill_sets()
+    list.unchanged = true
+    return list
+  end
   build.skillsTab:SetActiveSkillSet(id)
   build.skillsTab:AddUndoState()
   M.get_main_output()
@@ -2123,6 +2137,12 @@ function M.select_config_set(params)
   if not build or not build.configTab then return nil, 'config not initialized' end
   local set, id = configSetById(type(params) == 'table' and params.id)
   if not set then return nil, 'config set id ' .. tostring(params and params.id) .. ' not found (see list_config_sets)' end
+  -- OnSelClick does nothing for the set already active.
+  if id == build.configTab.activeConfigSetId then
+    local list = M.list_config_sets()
+    list.unchanged = true
+    return list
+  end
   build.configTab:SetActiveConfigSet(id)
   build.configTab:AddUndoState()
   M.get_main_output()
@@ -2395,12 +2415,14 @@ function M.set_minion(params)
     return nil, 'the main skill (' .. tostring(activeEffect.grantedEffect.name) .. ') has no minion to choose'
   end
   local src = activeEffect.srcInstance
+  -- Check the minion (or item set) before writing anything.
+  local field, value
   if params.minion ~= nil or params.itemSetId ~= nil then
     if activeEffect.grantedEffect.minionHasItemSet then
       if params.minion ~= nil then return nil, activeEffect.grantedEffect.name .. "'s minion is chosen by item set: give an item set id" end
       local itemSetId = tonumber(params.itemSetId)
       if not itemSetId or not build.itemsTab.itemSets[itemSetId] then return nil, 'item set id ' .. tostring(params.itemSetId) .. ' not found' end
-      src['skillMinionItemSet' .. suffix] = itemSetId
+      field, value = 'skillMinionItemSet' .. suffix, itemSetId
     else
       if params.itemSetId ~= nil then return nil, activeEffect.grantedEffect.name .. ' does not take an item set: give a minion' end
       local minionId, resolveErr = resolveMinion(tostring(params.minion), activeSkill.minionList or {})
@@ -2409,17 +2431,30 @@ function M.set_minion(params)
         for _, id in ipairs(activeSkill.minionList or {}) do table.insert(ids, id) end
         return nil, (resolveErr or 'unknown minion') .. ' for this skill; options: ' .. (#ids > 0 and table.concat(ids, ', ') or 'none (add spectres with set_spectres)')
       end
-      src['skillMinion' .. suffix] = minionId
+      field, value = 'skillMinion' .. suffix, minionId
     end
-    build.modFlag = true
-    build.buildFlag = true
+  end
+  -- The minion's skills depend on the minion chosen, so a minion skill can only
+  -- be checked after the recalculation; a failed check puts everything back.
+  local saved = {
+    minion = src['skillMinion' .. suffix], itemSet = src['skillMinionItemSet' .. suffix],
+    skill = src['skillMinionSkill' .. suffix], modFlag = build.modFlag, buildFlag = build.buildFlag,
+  }
+  local function fail(message)
+    src['skillMinion' .. suffix], src['skillMinionItemSet' .. suffix] = saved.minion, saved.itemSet
+    src['skillMinionSkill' .. suffix] = saved.skill
+    M.get_main_output()
+    build.modFlag, build.buildFlag = saved.modFlag, saved.buildFlag
+    return nil, message
+  end
+  if field then
+    src[field] = value
     M.get_main_output()
   end
   if params.minionSkill ~= nil then
-    -- The minion's skills depend on the minion just chosen, so read them after the recalculation.
     ctx = mainSkillFor(calcs)
     local minion = ctx and ctx.activeSkill.minion
-    if not minion then return nil, 'the main skill has no minion yet (no spectres in the build?)' end
+    if not minion then return fail('the main skill has no minion yet (no spectres in the build?)') end
     local skills = minion.activeSkillList or {}
     local index = tonumber(params.minionSkill)
     if not index then
@@ -2430,13 +2465,13 @@ function M.set_minion(params)
     if not index or not skills[index] then
       local names = {}
       for i, minionSkill in ipairs(skills) do table.insert(names, i .. '=' .. minionSkill.activeEffect.grantedEffect.name) end
-      return nil, 'minion skill ' .. tostring(params.minionSkill) .. ' not found; options: ' .. table.concat(names, ', ')
+      return fail('minion skill ' .. tostring(params.minionSkill) .. ' not found; options: ' .. table.concat(names, ', '))
     end
-    ctx.activeEffect.srcInstance['skillMinionSkill' .. suffix] = index
-    build.modFlag = true
-    build.buildFlag = true
+    src['skillMinionSkill' .. suffix] = index
     M.get_main_output()
   end
+  build.modFlag = true
+  build.buildFlag = true
   return M.get_minion_options({ calcs = calcs })
 end
 

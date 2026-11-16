@@ -175,6 +175,7 @@ export async function handleSelectSkillSet(context: SkillsConfigContext, args: {
     const luaClient = await client(context);
     const before = await readStats(luaClient);
     const list = await luaClient.selectSkillSet(id);
+    if (list.unchanged) return text(formatSkillSets(list, `Skill set id ${id} is already active; nothing changed.`));
     const after = await readStats(luaClient);
     return text([...formatSkillSets(list, `Switched to skill set id ${id}.`), ...statChanges(before, after)]);
   });
@@ -229,6 +230,7 @@ export async function handleSelectConfigSet(context: SkillsConfigContext, args: 
     const luaClient = await client(context);
     const before = await readStats(luaClient);
     const list = await luaClient.selectConfigSet(id);
+    if (list.unchanged) return text(formatConfigSets(list, `Config set id ${id} is already active; nothing changed.`));
     const after = await readStats(luaClient);
     return text([...formatConfigSets(list, `Switched to config set id ${id}.`), ...statChanges(before, after)]);
   });

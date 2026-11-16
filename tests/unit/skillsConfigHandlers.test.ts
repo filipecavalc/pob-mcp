@@ -90,6 +90,15 @@ describe('skill sets and config sets', () => {
     expect(text).toMatch(/Combined DPS: 100 -> 101/);
   });
 
+  it('reports selecting the active set as no change, without reading stats twice', async () => {
+    const selectSkillSet = jest.fn(async () => ({ ...skillSets, unchanged: true }));
+    const getStats = jest.fn(stats(1));
+    const text = textOf(await handleSelectSkillSet(ctx({ selectSkillSet, getStats }), { id: 1 }));
+    expect(text).toContain('Skill set id 1 is already active; nothing changed.');
+    expect(text).not.toContain('Stats (PoB)');
+    expect(getStats).toHaveBeenCalledTimes(1);
+  });
+
   it('validates ids and titles', async () => {
     await expect(handleSelectSkillSet(ctx({}), { id: 0 })).rejects.toThrow(/positive integer/);
     await expect(handleRenameSkillSet(ctx({}), { id: 1 })).rejects.toThrow(/title is required/);

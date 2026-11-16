@@ -1094,6 +1094,132 @@ export function getLuaToolSchemas(): ToolSchema[] {
         required: ["site"],
       },
     },
+    // Compare tab (PoB's Classes/CompareTab.lua). Comparison builds live with
+    // the loaded build; loading another build clears them, as in the app.
+    {
+      name: "compare_add_build",
+      description: "Load a build into Path of Building's Compare tab, next to the loaded build (lua_load_build first), from a build file or a PoB build code. Several can be loaded; the newest becomes the active comparison. Uses PoB's own CompareTab:ImportBuild, so the compared build is calculated by PoB. The loaded build is not changed. Then use compare_differences, compare_power_report, compare_select, compare_buy_similar, compare_copy. Unlike compare_builds (which reloads two files and reads a few stats), this keeps both builds in the engine.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          build_name: { type: "string", description: "Build file in the builds directory (e.g. 'RF.xml' or 'folder/name')." },
+          build_code: { type: "string", description: "A PoB build code (the export string). Give build_name or build_code." },
+          label: { type: "string", description: "Name shown for the comparison (default: the file name, or 'Imported build' for a code, as in PoB)." },
+        },
+      },
+    },
+    {
+      name: "compare_list",
+      description: "List the builds loaded in the Compare tab with their tree, item, skill and config sets (active marked), main skill group and headline stats.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "compare_remove_build",
+      description: "Remove a build from the Compare tab (PoB's Remove button). Only the in-memory comparison is dropped; no file is touched.",
+      inputSchema: {
+        type: "object",
+        properties: { index: { type: "number", description: "Comparison index from compare_list." } },
+        required: ["index"],
+      },
+    },
+    {
+      name: "compare_select",
+      description: "Choose the active comparison and the compared build's tree set, item set, skill set, config set and main socket group, as the Compare tab's selectors do; also the Calcs view's socket group, buff mode and minion toggle for the compared build. Sets are given by their position from compare_list.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          index: { type: "number", description: "Comparison to make active (default: the active one)." },
+          tree_set: { type: "number", description: "Tree set position." },
+          item_set: { type: "number", description: "Item set position." },
+          skill_set: { type: "number", description: "Skill set position." },
+          config_set: { type: "number", description: "Config set position." },
+          main_socket_group: { type: "number", description: "Main skill socket group (Summary/power report)." },
+          calcs_socket_group: { type: "number", description: "Socket group for the Calcs section." },
+          calcs_buff_mode: { type: "string", enum: ["UNBUFFED", "BUFFED", "COMBAT", "EFFECTIVE"], description: "Calcs section mode." },
+          calcs_show_minion: { type: "boolean", description: "Calcs section shows the minion instead of the player." },
+        },
+      },
+    },
+    {
+      name: "compare_differences",
+      description: "How the active comparison build differs from the loaded build, computed the way PoB's Compare tab does: stats (Summary view: every sidebar stat relevant to either skill, with difference and %), tree (overlay: nodes only in one build, and allocated nodes whose mastery or jewel differs), items (per slot match/different/missing/extra, jewel sockets, optional mod-by-mod markers and the stat change of equipping each compared item), skills (socket groups paired by gem similarity; gems common/only here/only there), config (options whose values differ), calcs (Calcs view rows, using PoB's own 'Show only differences' test). only_differences (default true) keeps only rows that differ; an item slot differs when the item text differs, even if PoB labels same-named items a 'match'.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          index: { type: "number", description: "Comparison to use (default: the active one)." },
+          sections: {
+            type: "array",
+            items: { type: "string", enum: ["stats", "tree", "items", "skills", "config", "calcs"] },
+            description: "Sections to report (default: stats, tree, items, skills, config; calcs is long, ask for it explicitly).",
+          },
+          only_differences: { type: "boolean", description: "Only rows that differ (default true). False also lists equal stats, matching slots and groups, and relevant equal config options.", default: true },
+          items_expanded: { type: "boolean", description: "List each item's mods with PoB's markers (+ only on this side, > / < higher / lower value), as the Items view's expanded mode.", default: false },
+          item_stat_changes: { type: "boolean", description: "For each differing slot, the loaded build's stat changes from equipping the compared item (the Equip button's tooltip).", default: false },
+          config_show_all: { type: "boolean", description: "With only_differences false: list all equal options, not only relevant ones (the 'Show All Configurations' toggle).", default: false },
+          calcs_filter: { type: "string", description: "Calcs: only sections, subsections or rows whose name contains this text." },
+          output: { type: "string", enum: ["text", "json"], description: "text (default) or the raw JSON." },
+        },
+      },
+    },
+    {
+      name: "compare_power_report",
+      truncatable: true,
+      description: "The Compare tab's power report: for one metric, the change on the loaded build from taking each element of the compared build — each passive it has that the loaded build lacks (with path length and per-point value), each item and jewel, each socket group the loaded build lacks, each support gem of its main skill, each differing config option. Calculated by PoB (CompareTab:ComparePowerBuilder). Without metric, lists the metrics. Long reports are truncated; use limit and sort_by.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          index: { type: "number", description: "Comparison to use (default: the active one)." },
+          metric: { type: "string", description: "Stat or label from the metric list, e.g. FullDPS, CombinedDPS, Life, TotalEHP." },
+          categories: {
+            type: "object",
+            description: "Categories to include (all default true).",
+            properties: {
+              tree: { type: "boolean" }, items: { type: "boolean" }, skill_gems: { type: "boolean" },
+              support_gems: { type: "boolean" }, config: { type: "boolean" },
+            },
+          },
+          sort_by: { type: "string", enum: ["impact", "category", "points", "per_point"], description: "Sort column (default impact, as PoB)." },
+          limit: { type: "number", description: "Show at most this many rows." },
+        },
+      },
+    },
+    {
+      name: "compare_buy_similar",
+      description: "The Items view's Buy button for a compared build's item: PoB builds the pathofexile.com trade search (CompareBuySimilar) for it. Returns the URL and query, and the mod and defence choices of the popup. As in the popup nothing is ticked by default; pick mods by number or 'all'. Uniques are searched by name. Reaches the trade site only to read its league list when no league is given (as the popup does), and for one search request when run_search is set.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          index: { type: "number", description: "Comparison to use (default: the active one)." },
+          slot: { type: "string", description: "Slot of the compared build: 'Helmet', 'Ring 1', 'Weapon 1 Swap', 'Flask 2', 'Belt Abyssal Socket 1', or a jewel socket 'Jewel <nodeId>' (see compare_differences items)." },
+          league: { type: "string", description: "Trade league. Default: what the popup picks (the current challenge league from the trade API), or Standard when the trade API is off." },
+          realm: { type: "string", enum: ["pc", "sony", "xbox"], description: "Realm (default pc)." },
+          listed: { type: "string", enum: ["securable", "available", "online", "any"], description: "Listing status: securable = Instant Buyout (popup default), available = Instant Buyout & In Person, online = In Person (Online), any." },
+          use_base_type: { type: "boolean", description: "Search the same base type (non-unique)." },
+          ilvl_min: { type: "number", description: "Minimum item level (non-unique)." },
+          ilvl_max: { type: "number", description: "Maximum item level (non-unique)." },
+          mods: { description: "Mods to search: 'all' or a list of mod numbers from the listing.", anyOf: [{ type: "string", enum: ["all"] }, { type: "array", items: { type: "number" } }] },
+          mod_values: { type: "object", description: "Per mod number, { min?, max? } replacing the prefilled minimum (the item's value).", additionalProperties: { type: "object", properties: { min: { type: "number" }, max: { type: "number" } } } },
+          defences: { description: "Defences to search (non-unique armour): 'all' or labels like 'Armour', 'Energy Shield'.", anyOf: [{ type: "string", enum: ["all"] }, { type: "array", items: { type: "string" } }] },
+          defence_values: { type: "object", description: "Per defence label, { min?, max? } replacing the prefilled minimum.", additionalProperties: { type: "object", properties: { min: { type: "number" }, max: { type: "number" } } } },
+          run_search: { type: "boolean", description: "Also run the search once through the trade API (needs POE_TRADE_ENABLED, PC realm) and report the listing count.", default: false },
+        },
+        required: ["slot"],
+      },
+    },
+    {
+      name: "compare_copy",
+      description: "Copy from the compared build into the loaded build, as the Compare tab's buttons do: what 'tree' adds the compared build's active tree as a new tree set ('Copy tree'; use true = 'Copy and use'); 'item' adds the compared item of a slot to the loaded build's items ('Copy'; use true = 'Equip' into the same slot, refused for Ring 3 when the loaded build has no third ring slot, where PoB shows 'Missing slot'); 'config' copies all its config values into the loaded build's active config set. Changes the loaded build in memory; save with lua_save_build.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          index: { type: "number", description: "Comparison to copy from (default: the active one)." },
+          what: { type: "string", enum: ["tree", "item", "config"] },
+          slot: { type: "string", description: "For item: the slot, e.g. 'Body Armour' or 'Jewel 26725'." },
+          use: { type: "boolean", description: "tree: make the copied tree active; item: equip it. Default false.", default: false },
+        },
+        required: ["what"],
+      },
+    },
   ];
 }
 

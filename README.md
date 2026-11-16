@@ -559,6 +559,21 @@ from PoB's `Modules/BuildSiteTools.lua`. Only the HTTP requests run in the serve
 | `import_build_link` | Import a build from a pobb.in, poe.ninja, Maxroll, pob.codes, Pastebin, Rentry or poedb link (or a `pob://` link, or a plain code), as the Import/Export tab does; optional `save_as` (no overwrite without `overwrite: true`) |
 | `share_build` | Upload the loaded build to a site PoB shares to and return the link, as the "Share" button; a preview lists what the code carries and its hash, and the upload needs `confirm_code_hash` from that preview |
 
+### Lua Bridge — Compare Tab
+
+PoB's Compare tab, run in the engine: comparison builds sit next to the loaded build and every difference is computed by PoB's own code. They live with the loaded build; loading another build clears them, as in the app. `compare_builds` and `compare_trees` above stay separate: they read two files on their own and do not use the Compare tab.
+
+| Tool | Description |
+|---|---|
+| `compare_add_build` | Load a build file or build code into the Compare tab (several allowed) |
+| `compare_list` | Loaded comparisons with their tree, item, skill and config sets and headline stats |
+| `compare_select` | Active comparison; its tree/item/skill/config set, main skill group, Calcs view skill and mode |
+| `compare_differences` | Stats, tree, items, skills, config and calcs differences, as the tab shows them ("show only differences" by default) |
+| `compare_power_report` | The tab's power report: the effect on the loaded build of each passive, item, socket group, support gem and config option of the compared build |
+| `compare_buy_similar` | The Items view's Buy button: PoB's trade search URL and query for a compared item; optional single search |
+| `compare_copy` | Copy tree (as a new tree set, optionally active), an item (optionally equipped) or the config into the loaded build |
+| `compare_remove_build` | Remove a comparison |
+
 ---
 
 ## Typical Workflows

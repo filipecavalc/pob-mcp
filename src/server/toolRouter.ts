@@ -39,6 +39,8 @@ import { handleSuggestCrafting } from "../handlers/craftingAdvisorHandler.js";
 import { handleFindItemUpgrades as handleFindItemUpgradesNew } from "../handlers/itemShoppingHandler.js";
 import { handleClassifyItemAffixes, handleListCraftableMods, handleFindAffixTiers } from "../handlers/affixHandlers.js";
 import { handleImportBuildLink, handleShareBuild } from "../handlers/buildSourceHandlers.js";
+import { handleCompareAddBuild, handleCompareList, handleCompareRemoveBuild, handleCompareSelect, handleCompareDifferences, handleComparePowerReport, handleCompareBuySimilar, handleCompareCopy, type CompareBuySimilarArgs } from "../handlers/compareHandlers.js";
+import type { CompareSelectParams, ComparePowerParams, CompareCopyParams } from "../types/compareTypes.js";
 
 export interface ToolRouterDependencies {
   contextBuilder: ContextBuilder;
@@ -853,6 +855,34 @@ export async function routeToolCall(
         site: args?.site as string | undefined,
         confirmCodeHash: args?.confirm_code_hash as string | undefined,
       });
+    // Compare tab (PoB's Classes/CompareTab.lua)
+    case "compare_add_build":
+      return await handleCompareAddBuild(luaContext, {
+        buildName: args?.build_name as string | undefined,
+        buildCode: args?.build_code as string | undefined,
+        label: args?.label as string | undefined,
+      });
+
+    case "compare_list":
+      return await handleCompareList(luaContext);
+
+    case "compare_remove_build":
+      return await handleCompareRemoveBuild(luaContext, Number(args?.index));
+
+    case "compare_select":
+      return await handleCompareSelect(luaContext, (args ?? {}) as CompareSelectParams);
+
+    case "compare_differences":
+      return await handleCompareDifferences(luaContext, (args ?? {}) as Parameters<typeof handleCompareDifferences>[1]);
+
+    case "compare_power_report":
+      return await handleComparePowerReport(luaContext, (args ?? {}) as ComparePowerParams);
+
+    case "compare_buy_similar":
+      return await handleCompareBuySimilar(luaContext, (args ?? {}) as unknown as CompareBuySimilarArgs, deps.tradeClient);
+
+    case "compare_copy":
+      return await handleCompareCopy(luaContext, (args ?? {}) as unknown as CompareCopyParams);
 
     default:
       throw new Error(`Unknown tool: ${name}`);

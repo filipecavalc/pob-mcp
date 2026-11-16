@@ -1866,4 +1866,1190 @@ function M.resolve_build_link(params)
   }
 end
 
+
+-- ============================================================
+-- Compare tab (Classes/CompareTab.lua, CompareEntry.lua, CompareBuySimilar.lua,
+-- ComparePowerReportListControl.lua, TradeHelpers.lua)
+--
+-- The loaded build owns a CompareTab (build.compareTab, Modules/Build.lua),
+-- headless as in the window. Comparison builds are CompareEntry objects held
+-- by that tab, so they live as long as the loaded build. Loading, removing,
+-- set selection, copying, the power report and the trade URL call the tab's
+-- own methods. The difference lists are computed inside its Draw* methods,
+-- which only draw; their logic is mirrored here step by step (each function
+-- names the method it follows) and calls the same helpers they call. Helpers
+-- the tab keeps in file locals (matchFlags, calcRowMatchesBetweenBuilds,
+-- tradeHelpers, buySimilar's buildURL, ...) are read from the methods'
+-- upvalues, so they are PoB's own functions, not copies.
+-- ============================================================
+
+-- The upvalue `name` of a PoB function, or nil.
+local function pobUpvalue(fn, name)
+  if type(fn) ~= 'function' or not debug or not debug.getupvalue then return nil end
+  local i = 1
+  while true do
+    local upName, value = debug.getupvalue(fn, i)
+    if not upName then return nil end
+    if upName == name then return value end
+    i = i + 1
+  end
+end
+
+local function compareTab()
+  if not build then return nil, 'build not initialized' end
+  if not build.compareTab then return nil, 'this Path of Building version has no Compare tab' end
+  return build.compareTab
+end
+
+-- The comparison entry at `index` (default: the tab's active one). Selecting
+-- it makes it the tab's active comparison, as the "Compare with" dropdown does.
+local function compareEntryAt(ct, index)
+  if #ct.compareEntries == 0 then return nil, 'no comparison build loaded; use compare_add_build first' end
+  if index ~= nil then
+    local i = tonumber(index)
+    if not i or not ct.compareEntries[i] then
+      return nil, string.format('comparison %s not found (loaded: 1-%d)', tostring(index), #ct.compareEntries)
+    end
+    if ct.activeCompareIndex ~= i then
+      ct.activeCompareIndex = i
+      ct.treeSearchNeedsSync = true
+      ct:UpdateBuildSelector()
+    end
+  end
+  local entry = ct:GetActiveCompare()
+  if not entry then return nil, 'no active comparison build' end
+  -- CompareTabClass:Draw rebuilds a flagged entry before using it.
+  if entry.buildFlag then entry:Rebuild() end
+  return entry, ct.activeCompareIndex
+end
+
+-- Bring the loaded build's output up to date before reading it.
+local function refreshPrimary()
+  if build.buildFlag then M.advanceFrame() end
+  if build.buildFlag then build.calcsTab:BuildOutput() end
+end
+
+local function setTitles(orderList, sets, activeId)
+  local list = {}
+  for index, id in ipairs(orderList or {}) do
+    local set = sets and sets[id]
+    table.insert(list, { index = index, id = id, title = stripColourCodes(set and set.title or 'Default'), active = id == activeId })
+  end
+  return list
+end
+
+local function socketGroupLabel(group, index)
+  local label = group.displayLabel or group.label or ('Group ' .. index)
+  if group.slot then label = label .. ' (' .. group.slot .. ')' end
+  return stripColourCodes(label)
+end
+
+local function compareEntryInfo(ct, entry, index)
+  local spec = entry.spec
+  local out = entry:GetOutput() or {}
+  local treeSets = {}
+  for i, title in ipairs(entry.treeTab and entry.treeTab:GetSpecList() or {}) do
+    table.insert(treeSets, { index = i, title = stripColourCodes(title), active = i == entry.treeTab.activeSpec })
+  end
+  local groups = {}
+  for i, group in ipairs(entry.skillsTab and entry.skillsTab.socketGroupList or {}) do
+    table.insert(groups, { index = i, label = socketGroupLabel(group, i), enabled = group.enabled ~= false })
+  end
+  return {
+    index = index,
+    label = entry.label,
+    active = index == ct.activeCompareIndex,
+    className = spec and spec.curClassName,
+    ascendClassName = spec and spec.curAscendClassName,
+    level = entry.characterLevel,
+    treeVersion = spec and spec.treeVersion,
+    treeSets = treeSets,
+    itemSets = entry.itemsTab and setTitles(entry.itemsTab.itemSetOrderList, entry.itemsTab.itemSets, entry.itemsTab.activeItemSetId) or {},
+    skillSets = entry.skillsTab and setTitles(entry.skillsTab.skillSetOrderList, entry.skillsTab.skillSets, entry.skillsTab.activeSkillSetId) or {},
+    configSets = entry.configTab and setTitles(entry.configTab.configSetOrderList, entry.configTab.configSets, entry.configTab.activeConfigSetId) or {},
+    mainSocketGroup = entry.mainSocketGroup,
+    calcsSocketGroup = entry.calcsTab and entry.calcsTab.input.skill_number,
+    calcsBuffMode = entry.calcsTab and entry.calcsTab.input.misc_buffMode,
+    socketGroups = groups,
+    stats = {
+      Life = out.Life, EnergyShield = out.EnergyShield, Mana = out.Mana, TotalEHP = out.TotalEHP,
+      CombinedDPS = out.CombinedDPS, FullDPS = out.FullDPS, TotalDPS = out.TotalDPS,
+    },
+  }
+end
+
+function M.compare_list()
+  local ct, err = compareTab()
+  if not ct then return nil, err end
+  local entries = {}
+  for i, entry in ipairs(ct.compareEntries) do
+    if entry.buildFlag then entry:Rebuild() end
+    table.insert(entries, compareEntryInfo(ct, entry, i))
+  end
+  return {
+    primary = { name = build.buildName, className = build.spec and build.spec.curClassName, ascendClassName = build.spec and build.spec.curAscendClassName, level = build.characterLevel },
+    activeIndex = ct.activeCompareIndex,
+    entries = entries,
+  }
+end
+
+-- params: { xml: string, label?: string }
+-- CompareTabClass:ImportBuild, as the Import popup ("build code") and the
+-- "Import from Folder" popup call it after reading the code or file.
+function M.compare_import(params)
+  local ct, err = compareTab()
+  if not ct then return nil, err end
+  if type(params) ~= 'table' or type(params.xml) ~= 'string' or params.xml == '' then return nil, 'missing xml' end
+  local label = (type(params.label) == 'string' and params.label ~= '') and params.label or 'Imported build'
+  local before = #ct.compareEntries
+  local ok, imported = pcall(ct.ImportBuild, ct, params.xml, label)
+  if not ok then return nil, 'import failed: ' .. tostring(imported) end
+  if not imported or #ct.compareEntries == before then
+    return nil, 'Path of Building could not load this build for comparison (CompareEntry produced no output); check the XML'
+  end
+  local index = #ct.compareEntries
+  return { entry = compareEntryInfo(ct, ct.compareEntries[index], index), count = index }
+end
+
+-- params: { index: number } -- CompareTabClass:RemoveBuild ("Remove" button)
+function M.compare_remove(params)
+  local ct, err = compareTab()
+  if not ct then return nil, err end
+  local index = tonumber(params and params.index)
+  if not index or not ct.compareEntries[index] then
+    return nil, string.format('comparison %s not found (loaded: %d)', tostring(params and params.index), #ct.compareEntries)
+  end
+  local label = ct.compareEntries[index].label
+  ct:RemoveBuild(index)
+  local list = M.compare_list()
+  list.removed = label
+  return list
+end
+
+local CALCS_BUFF_MODES = { UNBUFFED = true, BUFFED = true, COMBAT = true, EFFECTIVE = true }
+
+-- params: { index?, tree_set?, item_set?, skill_set?, config_set?, main_socket_group?,
+--           calcs_socket_group?, calcs_buff_mode?, calcs_show_minion? }
+-- The comparison build's selectors in CompareTabClass:InitControls:
+-- compareSpecSelect, compareSkillSetSelect, compareItemSetSelect,
+-- compareConfigSetSelect, cmpSocketGroup, cmpCalcsSocketGroup, cmpCalcsMode,
+-- cmpCalcsShowMinion. Sets are picked by their position in the dropdown.
+function M.compare_select(params)
+  local ct, err = compareTab()
+  if not ct then return nil, err end
+  params = type(params) == 'table' and params or {}
+  -- Validate every choice before changing anything, so a bad one leaves the
+  -- tab and the compared build as they were.
+  local target
+  if params.index ~= nil then
+    target = ct.compareEntries[tonumber(params.index) or -1]
+    if not target then
+      return nil, string.format('comparison %s not found (loaded: 1-%d)', tostring(params.index), #ct.compareEntries)
+    end
+  else
+    target = ct:GetActiveCompare()
+  end
+  if not target then return nil, 'no comparison build loaded; use compare_add_build first' end
+  local function pick(orderList, value, what)
+    local i = tonumber(value)
+    if not i or not orderList[i] then
+      return nil, string.format('%s %s not found (1-%d)', what, tostring(value), #orderList)
+    end
+    return i
+  end
+  local sel, perr = {}, nil
+  if params.tree_set ~= nil then
+    sel.tree, perr = pick(target.treeTab.specList, params.tree_set, 'tree set')
+    if not sel.tree then return nil, perr end
+  end
+  if params.skill_set ~= nil then
+    sel.skill, perr = pick(target.skillsTab.skillSetOrderList, params.skill_set, 'skill set')
+    if not sel.skill then return nil, perr end
+  end
+  if params.item_set ~= nil then
+    sel.item, perr = pick(target.itemsTab.itemSetOrderList, params.item_set, 'item set')
+    if not sel.item then return nil, perr end
+  end
+  if params.config_set ~= nil then
+    sel.config, perr = pick(target.configTab.configSetOrderList, params.config_set, 'config set')
+    if not sel.config then return nil, perr end
+  end
+  -- Socket groups belong to the skill set: check them against the one that
+  -- will be active (SkillsTab:SetActiveSkillSet swaps socketGroupList).
+  local groups = target.skillsTab.socketGroupList
+  if sel.skill then
+    local skillSet = target.skillsTab.skillSets[target.skillsTab.skillSetOrderList[sel.skill]]
+    groups = skillSet and skillSet.socketGroupList or groups
+  end
+  if params.main_socket_group ~= nil then
+    sel.main, perr = pick(groups, params.main_socket_group, 'socket group')
+    if not sel.main then return nil, perr end
+  end
+  if params.calcs_socket_group ~= nil then
+    sel.calcs, perr = pick(groups, params.calcs_socket_group, 'socket group')
+    if not sel.calcs then return nil, perr end
+  end
+  if params.calcs_buff_mode ~= nil then
+    sel.mode = tostring(params.calcs_buff_mode):upper()
+    if not CALCS_BUFF_MODES[sel.mode] then return nil, 'calcs_buff_mode must be UNBUFFED, BUFFED, COMBAT or EFFECTIVE' end
+  end
+
+  local entry, index = compareEntryAt(ct, params.index)
+  if not entry then return nil, index end
+  local changed = {}
+  if sel.tree then
+    entry:SetActiveSpec(sel.tree)
+    if build.spec then build.spec:SetWindowTitleWithBuildClass() end
+    table.insert(changed, 'tree_set')
+  end
+  if sel.skill then
+    entry:SetActiveSkillSet(entry.skillsTab.skillSetOrderList[sel.skill])
+    table.insert(changed, 'skill_set')
+  end
+  if sel.item then
+    entry:SetActiveItemSet(entry.itemsTab.itemSetOrderList[sel.item])
+    table.insert(changed, 'item_set')
+  end
+  if sel.config then
+    entry.configTab:SetActiveConfigSet(entry.configTab.configSetOrderList[sel.config])
+    entry.buildFlag = true
+    ct.configNeedsRebuild = true
+    table.insert(changed, 'config_set')
+  end
+  if sel.main then
+    entry:SetMainSocketGroup(sel.main)
+    table.insert(changed, 'main_socket_group')
+  end
+  if sel.calcs then
+    entry.calcsTab.input.skill_number = sel.calcs
+    entry.buildFlag = true
+    table.insert(changed, 'calcs_socket_group')
+  end
+  if sel.mode then
+    entry.calcsTab.input.misc_buffMode = sel.mode
+    entry.buildFlag = true
+    table.insert(changed, 'calcs_buff_mode')
+  end
+  if params.calcs_show_minion ~= nil then
+    entry.calcsTab.input.showMinion = params.calcs_show_minion == true
+    entry.buildFlag = true
+    table.insert(changed, 'calcs_show_minion')
+  end
+  if entry.buildFlag then entry:Rebuild() end
+  return { entry = compareEntryInfo(ct, entry, index), changed = changed }
+end
+
+-- Summary view: CompareTabClass:DrawSummary and DrawStatList.
+local function compareStats(ct, entry, onlyDifferences)
+  local primaryCalcs, compareCalcs = build.calcsTab, entry.calcsTab
+  local pEnv, cEnv = primaryCalcs.mainEnv, compareCalcs.mainEnv
+  local pMinion = pEnv and pEnv.player and pEnv.player.mainSkill and pEnv.player.mainSkill.minion and pEnv.minion
+  local cMinion = cEnv and cEnv.player and cEnv.player.mainSkill and cEnv.player.mainSkill.minion and cEnv.minion
+  local useMinion = (pMinion or cMinion) and true or false
+  local pOut = pMinion and pEnv.minion.output or primaryCalcs.mainOutput
+  local cOut = cMinion and cEnv.minion.output or entry:GetOutput()
+  if not pOut or not cOut then return nil, 'no calculated output for one of the builds' end
+  local displayStats = useMinion and build.minionDisplayStats or build.displayStats
+  local pActor = pMinion and pEnv.minion or pEnv.player
+  local cActor = cMinion and cEnv.minion or cEnv.player
+  local matchFlags = pobUpvalue(ct.DrawStatList, 'matchFlags')
+  if not matchFlags then return nil, "CompareTab's matchFlags helper not found" end
+  local pFlags = pActor and pActor.mainSkill and pActor.mainSkill.skillFlags or {}
+  local cFlags = cActor and cActor.mainSkill and cActor.mainSkill.skillFlags or {}
+  local rows = {}
+  for _, statData in ipairs(displayStats) do
+    if not statData.stat and not statData.label then
+      -- section spacer
+    elseif statData.stat == 'SkillDPS' or statData.hideStat then
+      -- skipped by DrawStatList
+    elseif not matchFlags(statData.flag, statData.notFlag, pFlags) and not matchFlags(statData.flag, statData.notFlag, cFlags) then
+      -- not relevant to either build's skill
+    elseif statData.stat then
+      local pVal = pOut[statData.stat] or 0
+      local cVal = cOut[statData.stat] or 0
+      if statData.childStat then
+        pVal = type(pVal) == 'table' and pVal[statData.childStat] or 0
+        cVal = type(cVal) == 'table' and cVal[statData.childStat] or 0
+      end
+      if type(pVal) == 'table' or type(cVal) == 'table' then pVal, cVal = 0, 0 end
+      if (pVal ~= 0 or cVal ~= 0) and (not statData.condFunc or statData.condFunc(pVal, pOut) or statData.condFunc(cVal, cOut)) then
+        local fmt = statData.fmt or 'd'
+        local multiplier = (statData.pc or statData.mod) and 100 or 1
+        local diff = cVal - pVal
+        local differs = diff > 0.001 or diff < -0.001
+        local row = {
+          label = stripColourCodes(statData.label or statData.stat),
+          stat = statData.stat,
+          childStat = statData.childStat,
+          primary = pVal * multiplier,
+          compare = cVal * multiplier,
+          primaryText = formatNumSep(string.format('%' .. fmt, pVal * multiplier)),
+          compareText = formatNumSep(string.format('%' .. fmt, cVal * multiplier)),
+          lowerIsBetter = statData.lowerIsBetter and true or false,
+        }
+        if differs then
+          row.diff = diff * multiplier
+          row.diffText = formatNumSep(string.format('%+' .. fmt, diff * multiplier))
+          row.better = (statData.lowerIsBetter and diff < 0) or (not statData.lowerIsBetter and diff > 0)
+          if pVal ~= 0 then row.percent = cVal / pVal * 100 - 100 end
+        end
+        if differs or not onlyDifferences then table.insert(rows, row) end
+      end
+    elseif statData.label and statData.condFunc then
+      local pShown = statData.condFunc(pOut) and true or false
+      local cShown = statData.condFunc(cOut) and true or false
+      if (pShown or cShown) and (pShown ~= cShown or not onlyDifferences) then
+        table.insert(rows, {
+          label = stripColourCodes(statData.label),
+          primaryText = pShown and (statData.val or '') or '-',
+          compareText = cShown and (statData.val or '') or '-',
+        })
+      end
+    end
+  end
+  return { minionStats = useMinion, rows = rows }
+end
+
+-- Tree view, overlay mode: CompareTabClass:DrawTree hands the comparison's spec
+-- to the loaded build's PassiveTreeView as compareSpec; the view colours each
+-- node with PassiveTreeViewClass:GetCompareNodeColor (green: compared build
+-- only, red: loaded build only, blue: mastery choice or socketed jewel differs)
+-- and draws compare-only nodes (cluster jewel subgraphs) green.
+local function compareTree(ct, entry, onlyDifferences)
+  local spec, cSpec = build.spec, entry.spec
+  local viewer = build.treeTab and build.treeTab.viewer
+  if not spec or not cSpec or not viewer or not viewer.GetCompareNodeColor then return nil, 'tree view not available' end
+  local function jewelName(itemsTab, jewel)
+    return jewel and stripColourCodes(jewel.title or jewel.name) or nil
+  end
+  local function nodeInfo(node, status, cNode)
+    local info = { id = node.id, name = node.dn, type = node.type, status = status, ascendancy = node.ascendancyName }
+    if node.type == 'Mastery' then
+      if node.alloc then info.primaryEffect = stripColourCodes(table.concat(node.sd or {}, ' / ')) end
+      if cNode and cNode.alloc then info.compareEffect = stripColourCodes(table.concat(cNode.sd or {}, ' / ')) end
+    elseif node.type == 'Socket' then
+      local pJewelId = spec.jewels and spec.jewels[node.id]
+      info.primaryJewel = jewelName(build.itemsTab, pJewelId and build.itemsTab.items[pJewelId])
+      info.compareJewel = jewelName(entry.itemsTab, viewer:GetCompareJewel(node.id))
+    end
+    return info
+  end
+  local added, removed, changed = {}, {}, {}
+  local shared = 0
+  viewer.compareSpec = cSpec
+  local ok, perr = pcall(function()
+    for nodeId, node in pairs(spec.nodes) do
+      local cNode = cSpec.nodes[nodeId]
+      local r, g, b = viewer:GetCompareNodeColor(node, cNode, spec, build, 'same')
+      if r == 0 and g == 1 and b == 0 then
+        table.insert(added, nodeInfo(node, 'compare_only', cNode))
+      elseif r == 1 and g == 0 and b == 0 then
+        table.insert(removed, nodeInfo(node, 'primary_only', cNode))
+      elseif r == 0 and g == 0 and b == 1 then
+        table.insert(changed, nodeInfo(node, 'differs', cNode))
+      elseif node.alloc then
+        shared = shared + 1
+      end
+    end
+    for nodeId, cNode in pairs(cSpec.nodes) do
+      if not spec.nodes[nodeId] and cNode.alloc and cNode.type ~= 'ClassStart' and cNode.type ~= 'AscendClassStart' then
+        table.insert(added, { id = nodeId, name = cNode.dn, type = cNode.type, status = 'compare_only', clusterNode = true })
+      end
+    end
+  end)
+  viewer.compareSpec = nil
+  if not ok then return nil, 'tree comparison failed: ' .. tostring(perr) end
+  local function byName(a, b) return tostring(a.name) < tostring(b.name) end
+  table.sort(added, byName); table.sort(removed, byName); table.sort(changed, byName)
+  local function counts(s)
+    local used, ascUsed = 0, 0
+    if s.CountAllocNodes then used, ascUsed = s:CountAllocNodes() end
+    return used, ascUsed
+  end
+  local pUsed, pAsc = counts(spec)
+  local cUsed, cAsc = counts(cSpec)
+  return {
+    primary = { className = spec.curClassName, ascendClassName = spec.curAscendClassName, treeVersion = spec.treeVersion, pointsUsed = pUsed, ascendancyPointsUsed = pAsc, specTitle = stripColourCodes(spec.title or 'Default') },
+    compare = { className = cSpec.curClassName, ascendClassName = cSpec.curAscendClassName, treeVersion = cSpec.treeVersion, pointsUsed = cUsed, ascendancyPointsUsed = cAsc, specTitle = stripColourCodes(cSpec.title or 'Default') },
+    compareOnly = added,
+    primaryOnly = removed,
+    differs = changed,
+    sharedCount = shared,
+    onlyDifferences = onlyDifferences,
+  }
+end
+
+-- Items view: CompareTabClass:DrawItems (slot list, jewel section) with
+-- TradeHelpers.getSlotDiffLabel, and DrawItemExpanded's mod markers
+-- ("+" only on this side, ">" / "<" same mod with a higher / lower value).
+local ITEM_BASE_SLOTS = { "Weapon 1", "Weapon 2", "Weapon 1 Swap", "Weapon 2 Swap", "Helmet", "Body Armour", "Gloves",
+  "Boots", "Amulet", "Ring 1", "Ring 2", "Belt", "Flask 1", "Flask 2", "Flask 3", "Flask 4", "Flask 5" }
+
+local function compareTradeHelpers(ct)
+  return pobUpvalue(ct.DrawItems, 'tradeHelpers')
+end
+
+local function itemModLines(tradeHelpers, item, otherModMap)
+  local lines = {}
+  if not item then return lines end
+  for _, modListData in ipairs{ item.enchantModLines or {}, item.scourgeModLines or {}, item.implicitModLines or {}, item.explicitModLines or {}, item.crucibleModLines or {} } do
+    for _, modLine in ipairs(modListData) do
+      if item:CheckModLineVariant(modLine) then
+        local formatted = itemLib.formatModLine(modLine)
+        if formatted then
+          local marker
+          if otherModMap then
+            local otherEntry = otherModMap[tradeHelpers.modLineTemplate(modLine.line)]
+            if not otherEntry then
+              marker = '+'
+            elseif otherEntry.line ~= modLine.line then
+              local myVal = tradeHelpers.modLineValue(modLine.line)
+              local otherVal = otherEntry.value
+              if myVal and otherVal and myVal > otherVal then marker = '>'
+              elseif myVal and otherVal and myVal < otherVal then marker = '<' end
+            end
+          end
+          table.insert(lines, { text = stripColourCodes(formatted), marker = marker })
+        end
+      end
+    end
+  end
+  return lines
+end
+
+local function itemSummary(item)
+  if not item then return nil end
+  return { id = item.id, name = stripColourCodes(item.name), title = item.title, baseName = item.baseName, rarity = item.rarity, corrupted = item.corrupted and true or nil }
+end
+
+-- The "Equip" button's hover tooltip in DrawItems: the loaded build's stat
+-- changes with the compared item in that slot (Build:AddStatComparesToTooltip).
+local function equipStatChanges(slotName, item)
+  local calcFunc, calcBase = build.compareTab.calcs.getMiscCalculator(build)
+  local newItem = Compat.construct('Item', item.raw)
+  newItem:NormaliseQuality()
+  local pSlot = build.itemsTab.slots[slotName]
+  local override = { repSlotName = slotName, repItem = newItem }
+  if pSlot and pSlot.nodeId and build.spec.allocNodes and not build.spec.allocNodes[pSlot.nodeId] then
+    local node = build.spec.nodes[pSlot.nodeId]
+    if node then override.addNodes = { [node] = true } end
+  end
+  local output = calcFunc(override)
+  local tooltip = new('Tooltip')
+  local count = build:AddStatComparesToTooltip(tooltip, calcBase, output, '')
+  local lines = {}
+  for _, line in ipairs(tooltip.lines) do
+    local text = line.text and stripColourCodes(line.text)
+    if text and text ~= '' then table.insert(lines, text) end
+  end
+  return lines, count
+end
+
+local function compareItems(ct, entry, onlyDifferences, expanded, statChanges)
+  local tradeHelpers = compareTradeHelpers(ct)
+  if not tradeHelpers then return nil, "CompareTab's trade helpers not found" end
+  local baseSlots = {}
+  for _, s in ipairs(ITEM_BASE_SLOTS) do table.insert(baseSlots, s) end
+  if ct:ShouldShowRing3(entry) then table.insert(baseSlots, 10, 'Ring 3') end
+  ct:AddAbyssSockets(entry, baseSlots, false)
+  local pEnv = build.calcsTab.mainEnv
+  local primaryHasRing3 = pEnv and pEnv.modDB:Flag(nil, 'AdditionalRingSlot')
+  local pTab, cTab = build.itemsTab, entry.itemsTab
+  -- PoB's label calls items with the same name a "match"; whether a slot
+  -- differs is decided on the full item text instead, as the tree overlay's
+  -- jewel comparison does (compareJewelsEqual in PassiveTreeView).
+  local function sameItem(a, b)
+    if not a or not b then return a == b end
+    return a:BuildRaw() == b:BuildRaw()
+  end
+  local function row(label, slotName, pItem, cItem, extra)
+    local diffLabel = stripColourCodes(tradeHelpers.getSlotDiffLabel(pItem, cItem)):gsub('^%((.*)%)$', '%1')
+    local identical = sameItem(pItem, cItem)
+    if onlyDifferences and identical then return nil end
+    local r = { slot = label, slotName = slotName, status = diffLabel, identical = identical, primary = itemSummary(pItem), compare = itemSummary(cItem) }
+    for k, v in pairs(extra or {}) do r[k] = v end
+    if expanded then
+      local pMap, cMap = tradeHelpers.buildModMap(pItem), tradeHelpers.buildModMap(cItem)
+      r.primaryMods = itemModLines(tradeHelpers, pItem, cMap)
+      r.compareMods = itemModLines(tradeHelpers, cItem, pMap)
+    end
+    -- No Equip button (and so no tooltip) where the loaded build lacks the
+    -- slot: TradeHelpers.drawCopyButtons shows "Missing slot" instead.
+    if statChanges and cItem and cItem.raw and not identical and not r.slotMissingInPrimary then
+      local ok, lines = pcall(equipStatChanges, slotName, cItem)
+      r.equipStatChanges = ok and lines or { 'failed: ' .. tostring(lines) }
+    end
+    return r
+  end
+  local slots = {}
+  for _, slotName in ipairs(baseSlots) do
+    local pSlot, cSlot = pTab.slots[slotName], cTab.slots[slotName]
+    local pItem = pSlot and pTab.items[pSlot.selItemId]
+    local cItem = cSlot and cTab.items[cSlot.selItemId]
+    local r = row(slotName, slotName, pItem, cItem, { slotMissingInPrimary = (slotName == 'Ring 3' and not primaryHasRing3) or nil })
+    if r then table.insert(slots, r) end
+  end
+  local jewels = {}
+  for _, jEntry in ipairs(ct:GetJewelComparisonSlots(entry)) do
+    local r = row(stripColourCodes(jEntry.label), jEntry.pSlotName, jEntry.pItem, jEntry.cItem, {
+      nodeId = jEntry.nodeId,
+      primaryNodeAllocated = jEntry.pNodeAllocated,
+      compareNodeAllocated = jEntry.cNodeAllocated,
+    })
+    if r then table.insert(jewels, r) end
+  end
+  local function activeSetTitle(tab)
+    local set = tab.itemSets and tab.itemSets[tab.activeItemSetId]
+    return stripColourCodes(set and set.title or 'Default')
+  end
+  return { primaryItemSet = activeSetTitle(pTab), compareItemSet = activeSetTitle(cTab), slots = slots, jewels = jewels }
+end
+
+-- Skills view: CompareTabClass:DrawSkills. Socket groups are paired greedily by
+-- Jaccard similarity of their gem names; within a pair common gems come first,
+-- then gems only on that side ("additional"), then gems only on the other side
+-- ("missing"). Imbued supports are listed as gems of their group.
+local function compareSkills(ct, entry, onlyDifferences)
+  local pSkillsTab, cSkillsTab = build.skillsTab, entry.skillsTab
+  local pGroups = pSkillsTab and pSkillsTab.socketGroupList or {}
+  local cGroups = cSkillsTab and cSkillsTab.socketGroupList or {}
+  local imbuedCache = {}
+  local function getImbuedGem(group, skillsTab)
+    if not group or not group.imbuedSupport then return nil end
+    if imbuedCache[group] then return imbuedCache[group] end
+    local grantedEffect = skillsTab and skillsTab.imbuedSupportBySlot and group.slot and skillsTab.imbuedSupportBySlot[group.slot]
+    if not grantedEffect then
+      local gemId = data.gemForBaseName and data.gemForBaseName[group.imbuedSupport:lower() .. ' support']
+      grantedEffect = gemId and data.gems[gemId] and data.gems[gemId].grantedEffect or nil
+    end
+    local gem = { grantedEffect = grantedEffect, nameSpec = group.imbuedSupport, level = 1, quality = 0, isImbuedSupport = true }
+    imbuedCache[group] = gem
+    return gem
+  end
+  local function gemName(gem) return gem.grantedEffect and gem.grantedEffect.name or gem.nameSpec end
+  local function gemsWithImbued(group, skillsTab)
+    if not group then return {} end
+    local gems = {}
+    for _, gem in ipairs(group.gemList or {}) do table.insert(gems, gem) end
+    local imbued = getImbuedGem(group, skillsTab)
+    if imbued then table.insert(gems, imbued) end
+    return gems
+  end
+  local function nameSet(group, skillsTab)
+    local set = {}
+    for _, gem in ipairs(gemsWithImbued(group, skillsTab)) do
+      local name = gemName(gem)
+      if name then set[name] = true end
+    end
+    return set
+  end
+  local function similarity(a, b)
+    local inter, union, keys = 0, 0, {}
+    for k in pairs(a) do keys[k] = true end
+    for k in pairs(b) do keys[k] = true end
+    for k in pairs(keys) do
+      union = union + 1
+      if a[k] and b[k] then inter = inter + 1 end
+    end
+    if union == 0 then return 0 end
+    return inter / union
+  end
+  local pSets, cSets = {}, {}
+  for i, g in ipairs(pGroups) do pSets[i] = nameSet(g, pSkillsTab) end
+  for i, g in ipairs(cGroups) do cSets[i] = nameSet(g, cSkillsTab) end
+  local scorePairs = {}
+  for pi = 1, #pGroups do
+    for ci = 1, #cGroups do
+      local score = similarity(pSets[pi], cSets[ci])
+      if score > 0 then table.insert(scorePairs, { pIdx = pi, cIdx = ci, score = score }) end
+    end
+  end
+  table.sort(scorePairs, function(a, b) return a.score > b.score end)
+  local pMatched, cMatched, pairsList = {}, {}, {}
+  for _, sp in ipairs(scorePairs) do
+    if not pMatched[sp.pIdx] and not cMatched[sp.cIdx] then
+      table.insert(pairsList, { pIdx = sp.pIdx, cIdx = sp.cIdx, score = sp.score })
+      pMatched[sp.pIdx] = true
+      cMatched[sp.cIdx] = true
+    end
+  end
+  for i = 1, #pGroups do if not pMatched[i] then table.insert(pairsList, { pIdx = i }) end end
+  for i = 1, #cGroups do if not cMatched[i] then table.insert(pairsList, { cIdx = i }) end end
+
+  local function gemEntry(e)
+    local out = { name = e.name, status = e.status }
+    if e.gem then
+      out.level = e.gem.level
+      out.quality = e.gem.quality
+      out.enabled = e.gem.enabled ~= false
+      out.support = (e.gem.grantedEffect and e.gem.grantedEffect.support) and true or false
+      out.imbued = e.gem.isImbuedSupport or nil
+    end
+    return out
+  end
+  local function aligned(pGroup, cGroup, pSet, cSet)
+    local pDisplay, cDisplay = {}, {}
+    local pGems, cGems = gemsWithImbued(pGroup, pSkillsTab), gemsWithImbued(cGroup, cSkillsTab)
+    local cByName = {}
+    for _, gem in ipairs(cGems) do
+      local name = gemName(gem)
+      if name and pSet[name] and not cByName[name] then cByName[name] = gem end
+    end
+    local emitted = {}
+    for _, gem in ipairs(pGems) do
+      local name = gemName(gem)
+      if name and cSet[name] and not emitted[name] then
+        emitted[name] = true
+        table.insert(pDisplay, gemEntry({ gem = gem, name = name, status = 'common' }))
+        table.insert(cDisplay, gemEntry({ gem = cByName[name], name = name, status = 'common' }))
+      end
+    end
+    for _, gem in ipairs(pGems) do
+      local name = gemName(gem)
+      if name and not cSet[name] then table.insert(pDisplay, gemEntry({ gem = gem, name = name, status = 'additional' })) end
+    end
+    for _, gem in ipairs(cGems) do
+      local name = gemName(gem)
+      if name and not pSet[name] then table.insert(cDisplay, gemEntry({ gem = gem, name = name, status = 'additional' })) end
+    end
+    if pGroup and cGroup then
+      local pMissing, cMissing = {}, {}
+      for name in pairs(cSet) do if not pSet[name] then table.insert(pMissing, name) end end
+      for name in pairs(pSet) do if not cSet[name] then table.insert(cMissing, name) end end
+      table.sort(pMissing); table.sort(cMissing)
+      for _, name in ipairs(pMissing) do table.insert(pDisplay, { name = name, status = 'missing' }) end
+      for _, name in ipairs(cMissing) do table.insert(cDisplay, { name = name, status = 'missing' }) end
+    end
+    return pDisplay, cDisplay
+  end
+  -- A pair differs when DrawSkills would print something different in its
+  -- columns: a gem marked additional/missing, or a common gem whose
+  -- level/quality text differs.
+  local function pairDiffers(pDisplay, cDisplay, pGroup, cGroup)
+    if not pGroup or not cGroup then return true end
+    for i, e in ipairs(pDisplay) do
+      if e.status ~= 'common' then return true end
+      local c = cDisplay[i]
+      if not c or c.level ~= e.level or c.quality ~= e.quality then return true end
+    end
+    for _, e in ipairs(cDisplay) do if e.status ~= 'common' then return true end end
+    return false
+  end
+  local out = {}
+  for _, pair in ipairs(pairsList) do
+    local pGroup = pair.pIdx and pGroups[pair.pIdx]
+    local cGroup = pair.cIdx and cGroups[pair.cIdx]
+    local pDisplay, cDisplay = aligned(pGroup, cGroup, pair.pIdx and pSets[pair.pIdx] or {}, pair.cIdx and cSets[pair.cIdx] or {})
+    local differs = pairDiffers(pDisplay, cDisplay, pGroup, cGroup)
+    if differs or not onlyDifferences then
+      table.insert(out, {
+        primaryGroup = pGroup and { index = pair.pIdx, label = socketGroupLabel(pGroup, pair.pIdx), enabled = pGroup.enabled ~= false, main = pair.pIdx == build.mainSocketGroup } or nil,
+        compareGroup = cGroup and { index = pair.cIdx, label = socketGroupLabel(cGroup, pair.cIdx), enabled = cGroup.enabled ~= false, main = pair.cIdx == entry.mainSocketGroup } or nil,
+        similarity = pair.score,
+        primaryGems = pDisplay,
+        compareGems = cDisplay,
+        differs = differs,
+      })
+    end
+  end
+  local function activeSkillSet(tab)
+    local set = tab.skillSets and tab.skillSets[tab.activeSkillSetId]
+    return stripColourCodes(set and set.title or 'Default')
+  end
+  return { primarySkillSet = activeSkillSet(pSkillsTab), compareSkillSet = activeSkillSet(cSkillsTab), pairs = out }
+end
+
+-- Config view: CompareTabClass:RebuildConfigControls groups ConfigOptions into
+-- sections (without "Custom Modifiers" and "Map Modifiers and Player
+-- Debuffs"); LayoutConfigView lists, per section, the options whose
+-- normalised values differ, then (unless only differences are wanted) the
+-- equal ones that ConfigVisibility marks relevant to either build, or all but
+-- the excluded ones with "Show All Configurations".
+local function compareConfig(ct, entry, onlyDifferences, showAll)
+  local configVisibility = pobUpvalue(ct.LayoutConfigView, 'configVisibility')
+  if not configVisibility then return nil, "CompareTab's ConfigVisibility module not found" end
+  ct:RebuildConfigControls(entry)
+  ct.configNeedsRebuild = true
+  local pInput = build.configTab.input or {}
+  local cInput = entry.configTab.input or {}
+  local sections = {}
+  local diffTotal = 0
+  for _, section in ipairs(ct.configSections) do
+    local diffs, commons = {}, {}
+    for _, ctrlInfo in ipairs(section.items) do
+      local varData = ctrlInfo.varData
+      local pVal, cVal = ct:NormalizeConfigVals(varData, pInput[varData.var], cInput[varData.var])
+      local row = {
+        var = varData.var,
+        label = stripColourCodes((varData.label or varData.var):gsub(':$', '')),
+        primary = stripColourCodes(ct:FormatConfigValue(varData, pInput[varData.var])),
+        compare = stripColourCodes(ct:FormatConfigValue(varData, cInput[varData.var])),
+        primaryValue = pInput[varData.var],
+        compareValue = cInput[varData.var],
+      }
+      if tostring(pVal) ~= tostring(cVal) then
+        row.differs = true
+        table.insert(diffs, row)
+      elseif not onlyDifferences then
+        local relevant = configVisibility.isRelevantForBuild(varData, build) or configVisibility.isRelevantForBuild(varData, entry)
+        if relevant or (showAll and not configVisibility.isShowAllExcluded(varData)) then
+          table.insert(commons, row)
+        end
+      end
+    end
+    local rows = {}
+    for _, r in ipairs(diffs) do table.insert(rows, r) end
+    for _, r in ipairs(commons) do table.insert(rows, r) end
+    if #rows > 0 then
+      diffTotal = diffTotal + #diffs
+      table.insert(sections, { name = section.name, diffCount = #diffs, rows = rows })
+    end
+  end
+  local function activeConfigSet(tab)
+    local set = tab.configSets and tab.configSets[tab.activeConfigSetId]
+    return stripColourCodes(set and set.title or 'Default')
+  end
+  return { primaryConfigSet = activeConfigSet(build.configTab), compareConfigSet = activeConfigSet(entry.configTab), differences = diffTotal, sections = sections }
+end
+
+-- Calcs view: CompareTabClass:DrawCalcs over Modules/CalcSections, with the
+-- tab's own calcRowMatchesBetweenBuilds and subSectionExtraMatches for
+-- "Show only differences". Values are formatCalcStr's text for each build's
+-- calcs environment (Calcs view skill selection).
+local function compareCalcs(ct, entry, onlyDifferences, filter)
+  local rowMatches = pobUpvalue(ct.DrawCalcs, 'calcRowMatchesBetweenBuilds')
+  local extraMatches = pobUpvalue(ct.DrawCalcs, 'subSectionExtraMatches')
+  if not rowMatches or not extraMatches then return nil, "CompareTab's calcs comparison helpers not found" end
+  local pEnv = build.calcsTab.calcsEnv
+  local cEnv = entry.calcsTab and entry.calcsTab.calcsEnv
+  if not pEnv or not cEnv then return nil, 'calcs environment not available' end
+  local pActor = (build.calcsTab.input.showMinion and pEnv.minion) or pEnv.player
+  local cActor = (entry.calcsTab.input.showMinion and cEnv.minion) or cEnv.player
+  if not pActor or not cActor then return nil, 'calcs actor not available' end
+  local needle = type(filter) == 'string' and filter ~= '' and filter:lower() or nil
+  local function fmt(colData, actor)
+    local ok, str = pcall(formatCalcStr, colData.format, actor, colData)
+    if ok and str then return stripColourCodes(tostring(str)) end
+    return nil
+  end
+  local sections = {}
+  local rowCount = 0
+  for _, secDef in ipairs(ct.calcSections) do
+    local id, group, subSections = secDef[2], secDef[3], secDef[5]
+    local secData = subSections[1].data
+    if build.calcsTab:CheckFlag(secData, pActor) then
+      local subs = {}
+      for _, subSec in ipairs(subSections) do
+        local rows = {}
+        local subMatches = not needle or tostring(id):lower():find(needle, 1, true) or tostring(subSec.label or ''):lower():find(needle, 1, true)
+        for _, rowData in ipairs(subSec.data) do
+          if rowData.label and rowData[1] and rowData[1].format then
+            local pVisible = build.calcsTab:CheckFlag(rowData, pActor)
+            local cVisible = build.calcsTab:CheckFlag(rowData, cActor)
+            if pVisible or cVisible then
+              local keep = true
+              if onlyDifferences and pVisible and cVisible then
+                keep = not rowMatches(ct, rowData[1], pActor, cActor, entry)
+              end
+              local label = stripColourCodes(rowData.label)
+              if keep and (subMatches or label:lower():find(needle, 1, true)) then
+                table.insert(rows, { label = label, primary = fmt(rowData[1], pActor), compare = fmt(rowData[1], cActor) })
+              end
+            end
+          end
+        end
+        local extraDiffers = not extraMatches(subSec.data, pActor, cActor)
+        if #rows > 0 or (onlyDifferences and extraDiffers and subMatches) then
+          local sub = { label = stripColourCodes(subSec.label), rows = rows }
+          if subSec.data.extra then
+            local okP, pExtra = pcall(formatCalcStr, subSec.data.extra, pActor)
+            local okC, cExtra = pcall(formatCalcStr, subSec.data.extra, cActor)
+            if okP and okC then sub.primaryExtra = stripColourCodes(pExtra); sub.compareExtra = stripColourCodes(cExtra) end
+          end
+          rowCount = rowCount + #rows
+          table.insert(subs, sub)
+        end
+      end
+      if #subs > 0 then table.insert(sections, { id = id, group = group, subSections = subs }) end
+    end
+  end
+  local function skillLabel(b, env)
+    local group = b.skillsTab.socketGroupList[b.calcsTab.input.skill_number]
+    return group and socketGroupLabel(group, b.calcsTab.input.skill_number) or nil
+  end
+  return {
+    primarySkill = skillLabel(build), compareSkill = skillLabel(entry),
+    primaryBuffMode = build.calcsTab.input.misc_buffMode, compareBuffMode = entry.calcsTab.input.misc_buffMode,
+    primaryShowsMinion = (build.calcsTab.input.showMinion and pEnv.minion) and true or false,
+    compareShowsMinion = (entry.calcsTab.input.showMinion and cEnv.minion) and true or false,
+    rowCount = rowCount, sections = sections,
+  }
+end
+
+-- params: { index?, sections?: string[] (stats, tree, items, skills, config, calcs),
+--           only_differences? (default true), items_expanded?, item_stat_changes?,
+--           config_show_all?, calcs_filter? }
+function M.compare_report(params)
+  local ct, err = compareTab()
+  if not ct then return nil, err end
+  params = type(params) == 'table' and params or {}
+  local entry, index = compareEntryAt(ct, params.index)
+  if not entry then return nil, index end
+  refreshPrimary()
+  local onlyDifferences = params.only_differences ~= false
+  local wanted = {}
+  local list = type(params.sections) == 'table' and #params.sections > 0 and params.sections or { 'stats', 'tree', 'items', 'skills', 'config' }
+  for _, s in ipairs(list) do wanted[tostring(s)] = true end
+  local result = {
+    primaryName = ct:GetShortBuildName(build.buildName),
+    compareName = entry.label,
+    index = index,
+    onlyDifferences = onlyDifferences,
+  }
+  local runners = {
+    stats = function() return compareStats(ct, entry, onlyDifferences) end,
+    tree = function() return compareTree(ct, entry, onlyDifferences) end,
+    items = function() return compareItems(ct, entry, onlyDifferences, params.items_expanded == true, params.item_stat_changes == true) end,
+    skills = function() return compareSkills(ct, entry, onlyDifferences) end,
+    config = function() return compareConfig(ct, entry, onlyDifferences, params.config_show_all == true) end,
+    calcs = function() return compareCalcs(ct, entry, onlyDifferences, params.calcs_filter) end,
+  }
+  for name in pairs(wanted) do
+    if not runners[name] then return nil, 'unknown section: ' .. name .. ' (stats, tree, items, skills, config, calcs)' end
+  end
+  for _, name in ipairs({ 'stats', 'tree', 'items', 'skills', 'config', 'calcs' }) do
+    if wanted[name] then
+      local ok, res, rerr = pcall(runners[name])
+      if not ok then
+        result[name] = { error = tostring(res) }
+      elseif res == nil then
+        result[name] = { error = rerr or 'failed' }
+      else
+        result[name] = res
+      end
+    end
+  end
+  return result
+end
+
+-- The metrics of the power report's dropdown (CompareTabClass:InitControls):
+-- data.powerStatList entries with a stat that are not ignoreForNodes.
+local function comparePowerStats()
+  local list = {}
+  for _, e in ipairs(data.powerStatList) do
+    if e.stat and not e.ignoreForNodes then table.insert(list, e) end
+  end
+  return list
+end
+
+local POWER_SORT_COLUMNS = { category = 1, impact = 3, points = 4, per_point = 5 }
+
+-- params: { index?, metric?: stat or label, categories?: { tree, items, skill_gems, support_gems, config },
+--           sort_by?: category|impact|points|per_point, limit? }
+-- CompareTabClass:ComparePowerBuilder, driven to completion the way
+-- RunComparePowerReport resumes it each frame; rows sorted and formatted by
+-- the tab's ComparePowerReportListControl (SetReport, ReSort, GetRowValue).
+function M.compare_power_report(params)
+  local ct, err = compareTab()
+  if not ct then return nil, err end
+  params = type(params) == 'table' and params or {}
+  local metrics = comparePowerStats()
+  local metricList = {}
+  for _, e in ipairs(metrics) do table.insert(metricList, { stat = e.stat, label = e.label }) end
+  if params.metric == nil or params.metric == '' then
+    return { metrics = metricList, needsMetric = true }
+  end
+  local wantedMetric = tostring(params.metric):lower()
+  local powerStat
+  for _, e in ipairs(metrics) do
+    if e.stat:lower() == wantedMetric or tostring(e.label):lower() == wantedMetric then powerStat = e break end
+  end
+  if not powerStat then return { metrics = metricList, unknownMetric = params.metric } end
+  local sortCol = POWER_SORT_COLUMNS[tostring(params.sort_by or 'impact')]
+  if not sortCol then return nil, 'sort_by must be category, impact, points or per_point' end
+  local entry, index = compareEntryAt(ct, params.index)
+  if not entry then return nil, index end
+  refreshPrimary()
+  local c = type(params.categories) == 'table' and params.categories or {}
+  local function flag(v) return v ~= false end
+  local categories = {
+    treeNodes = flag(c.tree), items = flag(c.items), skillGems = flag(c.skill_gems),
+    supportGems = flag(c.support_gems), config = flag(c.config),
+  }
+  ct.comparePowerStat = powerStat
+  ct.comparePowerCategories = categories
+  -- Keep the tab's metric dropdown and category checkboxes in step, so the
+  -- window (when the tools run there) shows the report it holds.
+  for i, v in ipairs(ct.controls.comparePowerStatSelect.list or {}) do
+    if v == powerStat then ct.controls.comparePowerStatSelect.selIndex = i end
+  end
+  ct.controls.comparePowerTreeCheck.state = categories.treeNodes
+  ct.controls.comparePowerItemsCheck.state = categories.items
+  ct.controls.comparePowerGemsCheck.state = categories.skillGems
+  ct.controls.comparePowerSupportGemsCheck.state = categories.supportGems
+  ct.controls.comparePowerConfigCheck.state = categories.config
+  ct.comparePowerCompareId = entry
+  ct.comparePowerDirty = false
+  ct.comparePowerResults = nil
+  ct.comparePowerProgress = 0
+  local co = coroutine.create(function() ct:ComparePowerBuilder(entry, powerStat, categories) end)
+  local steps = 0
+  while coroutine.status(co) ~= 'dead' do
+    local ok, cerr = coroutine.resume(co)
+    if not ok then
+      build.buildFlag = true
+      refreshPrimary()
+      return nil, 'power report failed: ' .. tostring(cerr)
+    end
+    steps = steps + 1
+  end
+  ct.comparePowerCoroutine = nil
+  ct.comparePowerListSynced = false
+  -- The builder adds and removes skill groups and config values on the loaded
+  -- build and leaves it flagged; recalculate so its output is current again.
+  build.buildFlag = true
+  refreshPrimary()
+  local results = ct.comparePowerResults or {}
+  local listControl = ct.controls.comparePowerReportList
+  listControl:SetReport(powerStat, results)
+  if sortCol ~= 3 then listControl:ReSort(sortCol) end
+  local limit = tonumber(params.limit)
+  local rows = {}
+  for i, r in ipairs(listControl.list) do
+    if limit and i > limit then break end
+    table.insert(rows, {
+      category = r.category,
+      name = stripColourCodes(r.name),
+      impact = r.impact,
+      percent = r.impactPercent,
+      impactText = stripColourCodes(listControl:GetRowValue(3, i, r)),
+      points = r.pathDist,
+      perPoint = r.perPoint,
+      perPointText = r.perPointStr and stripColourCodes(r.perPointStr) or nil,
+      nodeId = r.nodeId,
+      slotName = r.slotName,
+    })
+  end
+  return {
+    metric = { stat = powerStat.stat, label = powerStat.label },
+    categories = { tree = categories.treeNodes, items = categories.items, skill_gems = categories.skillGems, support_gems = categories.supportGems, config = categories.config },
+    compareName = entry.label,
+    index = index,
+    total = #listControl.list,
+    status = listControl.statusText,
+    rows = rows,
+    resumes = steps,
+  }
+end
+
+-- Resolve a compared item for the Items view's Copy / Equip / Buy buttons:
+-- a gear slot name, or a jewel socket ("Jewel <nodeId>" or its label).
+local function compareItemForSlot(ct, entry, slot)
+  if type(slot) ~= 'string' or slot == '' then return nil, 'slot is required (e.g. "Helmet", "Ring 1", "Jewel 26725")' end
+  local cSlot = entry.itemsTab.slots[slot]
+  if cSlot and not cSlot.nodeId then
+    local item = entry.itemsTab.items[cSlot.selItemId]
+    if not item then return nil, 'the compared build has no item in ' .. slot end
+    return item, slot, slot
+  end
+  local wanted = slot:lower()
+  for _, jEntry in ipairs(ct:GetJewelComparisonSlots(entry)) do
+    if jEntry.pSlotName:lower() == wanted or stripColourCodes(jEntry.label):lower() == wanted or tostring(jEntry.nodeId) == slot then
+      if not jEntry.cItem then return nil, 'the compared build has no jewel in ' .. slot end
+      return jEntry.cItem, jEntry.cSlotName, jEntry.pSlotName
+    end
+  end
+  return nil, 'unknown slot: ' .. slot
+end
+
+local REALM_DISPLAY = { pc = 'PC', sony = 'PS4', ps4 = 'PS4', xbox = 'Xbox' }
+local LISTED_INDEX = { securable = 1, available = 2, online = 3, any = 4 }
+
+-- params: { index?, slot, league?, realm?, listed?, use_base_type?, ilvl_min?, ilvl_max?,
+--           mods?: 'all' | number[], mod_values?: { [index]: { min?, max? } },
+--           defences?: 'all' | string[], defence_values?: { [label]: { min?, max? } } }
+-- The Items view's "Buy" button: CompareBuySimilar.openPopup collects the mod
+-- entries (CompareBuySimilar.addModEntries) and defence values, and its local
+-- buildURL turns the popup's selections into the trade search URL. Here the
+-- popup's controls are stand-ins holding the requested selections, with the
+-- popup's defaults otherwise (nothing ticked, mod minimums prefilled with the
+-- item's values, defence minimums with the floored defence values).
+function M.compare_buy_similar(params)
+  local ct, err = compareTab()
+  if not ct then return nil, err end
+  params = type(params) == 'table' and params or {}
+  local entry, index = compareEntryAt(ct, params.index)
+  if not entry then return nil, index end
+  local buySimilar = pobUpvalue(ct.DrawItems, 'buySimilar')
+  local buildURL = buySimilar and pobUpvalue(buySimilar.openPopup, 'buildURL')
+  if not buySimilar or not buildURL then return nil, "CompareBuySimilar's URL builder not found" end
+  local item, slotOrErr, equipSlotName = compareItemForSlot(ct, entry, params.slot)
+  if not item then return nil, slotOrErr end
+  local isUnique = item.rarity == 'UNIQUE' or item.rarity == 'RELIC'
+  local modEntries = buySimilar.addModEntries(item, {
+    { list = item.enchantModLines, type = 'enchant' },
+    { list = item.implicitModLines, type = 'implicit' },
+    { list = item.explicitModLines, type = 'explicit' },
+    { list = item.scourgeModLines, type = 'scourge' },
+  })
+  local defenceEntries = {}
+  if not isUnique and item.armourData and item.base and item.base.armour then
+    for _, def in ipairs({
+      { key = 'Armour', label = 'Armour', tradeKey = 'ar' },
+      { key = 'Evasion', label = 'Evasion', tradeKey = 'ev' },
+      { key = 'EnergyShield', label = 'Energy Shield', tradeKey = 'es' },
+      { key = 'Ward', label = 'Ward', tradeKey = 'ward' },
+    }) do
+      local val = item.armourData[def.key]
+      if val and val > 0 then table.insert(defenceEntries, { label = def.label, value = val, tradeKey = def.tradeKey }) end
+    end
+  end
+
+  local realmKey = tostring(params.realm or 'pc'):lower()
+  local realmDisplay = REALM_DISPLAY[realmKey]
+  if not realmDisplay then return nil, 'realm must be pc, sony or xbox' end
+  local league = (type(params.league) == 'string' and params.league ~= '') and params.league or 'Standard'
+  local listedIndex = LISTED_INDEX[tostring(params.listed or 'securable'):lower()]
+  if not listedIndex then return nil, 'listed must be securable, available, online or any' end
+  local function edit(value) return { buf = value ~= nil and tostring(value) or '' } end
+  local controls = {
+    realmDrop = { GetSelValue = function() return realmDisplay end },
+    leagueDrop = { GetSelValue = function() return league end },
+    listedDrop = { selIndex = listedIndex },
+  }
+  if not isUnique then
+    controls.baseTypeCheck = { state = params.use_base_type == true }
+    controls.ilvlMin = edit(tonumber(params.ilvl_min))
+    controls.ilvlMax = edit(tonumber(params.ilvl_max))
+  end
+
+  local wantAllMods = params.mods == 'all'
+  local wantedMods = {}
+  if type(params.mods) == 'table' then for _, i in ipairs(params.mods) do wantedMods[tonumber(i)] = true end end
+  local modValues = type(params.mod_values) == 'table' and params.mod_values or {}
+  local mods, skipped = {}, {}
+  for i, e in ipairs(modEntries) do
+    local prefix = 'mod' .. i
+    local canSearch = #e.tradeIds > 0
+    local checked = canSearch and (wantAllMods or wantedMods[i]) and true or false
+    if (wantAllMods or wantedMods[i]) and not canSearch then table.insert(skipped, i) end
+    controls[prefix .. 'Check'] = { state = checked }
+    local hasRange = not (e.isOption or e.needsExactValue) and e.value ~= nil
+    local override = modValues[tostring(i)] or modValues[i]
+    local minDefault = (hasRange and e.value ~= 0) and e.value or nil
+    local minVal, maxVal = minDefault, nil
+    if type(override) == 'table' then
+      if override.min ~= nil then minVal = tonumber(override.min) end
+      if override.max ~= nil then maxVal = tonumber(override.max) end
+    end
+    controls[prefix .. 'Min'] = edit(minVal)
+    controls[prefix .. 'Max'] = edit(maxVal)
+    local lines = {}
+    for _, l in ipairs(e.formattedLines) do table.insert(lines, stripColourCodes(l)) end
+    table.insert(mods, {
+      index = i, type = e.type, text = table.concat(lines, ' + '), searchable = canSearch, selected = checked,
+      option = e.isOption or nil, tradeIds = e.tradeIds, value = e.value, min = hasRange and minVal or nil, max = hasRange and maxVal or nil,
+    })
+  end
+  do
+    for i in pairs(wantedMods) do
+      if not modEntries[i] then return nil, string.format('mod %s not found (1-%d)', tostring(i), #modEntries) end
+    end
+  end
+
+  local wantAllDef = params.defences == 'all'
+  local wantedDef = {}
+  if type(params.defences) == 'table' then for _, d in ipairs(params.defences) do wantedDef[tostring(d):lower()] = true end end
+  local defValues = type(params.defence_values) == 'table' and params.defence_values or {}
+  local defences = {}
+  for i, def in ipairs(defenceEntries) do
+    local prefix = 'def' .. i
+    local checked = wantAllDef or wantedDef[def.label:lower()] or wantedDef[def.tradeKey] or false
+    local minVal, maxVal = math.floor(def.value), nil
+    local override = defValues[def.label] or defValues[def.tradeKey]
+    if type(override) == 'table' then
+      if override.min ~= nil then minVal = tonumber(override.min) end
+      if override.max ~= nil then maxVal = tonumber(override.max) end
+    end
+    controls[prefix .. 'Check'] = { state = checked and true or false }
+    controls[prefix .. 'Min'] = edit(minVal)
+    controls[prefix .. 'Max'] = edit(maxVal)
+    table.insert(defences, { label = def.label, tradeKey = def.tradeKey, value = def.value, selected = checked and true or false, min = minVal, max = maxVal })
+  end
+
+  local ok, url = pcall(buildURL, item, equipSlotName, controls, modEntries, defenceEntries, isUnique)
+  if not ok then return nil, 'building the trade URL failed: ' .. tostring(url) end
+  local tradeHelpers = compareTradeHelpers(ct)
+  local category = tradeHelpers and tradeHelpers.getTradeCategory(equipSlotName, item)
+  return {
+    url = url,
+    item = itemSummary(item),
+    slot = equipSlotName,
+    unique = isUnique,
+    category = (not isUnique) and category or nil,
+    categoryLabel = (not isUnique and tradeHelpers) and tradeHelpers.getTradeCategoryLabel(equipSlotName, item) or nil,
+    realm = realmDisplay, league = league, listed = params.listed or 'securable',
+    mods = mods, skippedMods = skipped, defences = defences,
+    compareName = entry.label, index = index,
+  }
+end
+
+-- params: { index?, what: 'tree'|'item'|'config', slot? (item), use?: boolean }
+-- The tab's copy buttons: "Copy tree" / "Copy and use" (CopyCompareSpecToPrimary),
+-- the Items view's "Copy" / "Equip" (CopyCompareItemToPrimary) and "Copy Config
+-- from Compare Build" (CopyCompareConfig).
+function M.compare_copy(params)
+  local ct, err = compareTab()
+  if not ct then return nil, err end
+  params = type(params) == 'table' and params or {}
+  local entry, index = compareEntryAt(ct, params.index)
+  if not entry then return nil, index end
+  local what = tostring(params.what or '')
+  local use = params.use == true
+  local result = { what = what, used = use, compareName = entry.label, index = index }
+  if what == 'tree' then
+    local source = entry.treeTab.specList[entry.treeTab.activeSpec]
+    if not source then return nil, 'the compared build has no active tree' end
+    local before = #build.treeTab.specList
+    ct:CopyCompareSpecToPrimary(use)
+    if #build.treeTab.specList == before then return nil, 'the tree was not copied' end
+    result.specIndex = #build.treeTab.specList
+    result.specTitle = stripColourCodes(build.treeTab.specList[result.specIndex].title)
+    result.activeSpec = build.treeTab.activeSpec
+  elseif what == 'item' then
+    local item, copySlotName, equipSlotName = compareItemForSlot(ct, entry, params.slot)
+    if not item then return nil, copySlotName end
+    -- DrawItems passes slotMissing for Ring 3 when the loaded build has no
+    -- third ring slot; that row shows "Missing slot" instead of Equip.
+    local pEnv = build.calcsTab.mainEnv
+    if use and equipSlotName == 'Ring 3' and not (pEnv and pEnv.modDB:Flag(nil, 'AdditionalRingSlot')) then
+      return nil, 'the loaded build has no Ring 3 slot (PoB shows "Missing slot" there, no Equip); copy without use to add the item unequipped'
+    end
+    -- ItemsTab:AddItem takes the lowest free id, so the new item is the one
+    -- whose id was not there before, not necessarily the highest.
+    local idsBefore = {}
+    for id in pairs(build.itemsTab.items) do idsBefore[id] = true end
+    -- The Items view copies from copySlotName and equips into equipSlotName;
+    -- for gear and jewel sockets both are the same slot name.
+    ct:CopyCompareItemToPrimary(use and equipSlotName or copySlotName, entry, use)
+    local newItem
+    for id, it in pairs(build.itemsTab.items) do if not idsBefore[id] then newItem = it end end
+    if not newItem then return nil, 'the item was not copied' end
+    result.item = itemSummary(newItem)
+    result.slot = equipSlotName
+    local pSlot = build.itemsTab.slots[equipSlotName]
+    result.equipped = pSlot and pSlot.selItemId == newItem.id or false
+  elseif what == 'config' then
+    ct:CopyCompareConfig()
+    result.configSet = stripColourCodes((build.configTab.configSets[build.configTab.activeConfigSetId] or {}).title or 'Default')
+  else
+    return nil, "what must be 'tree', 'item' or 'config'"
+  end
+  M.advanceFrame()
+  M.get_main_output()
+  local out = build.calcsTab.mainOutput or {}
+  result.stats = { Life = out.Life, EnergyShield = out.EnergyShield, TotalEHP = out.TotalEHP, CombinedDPS = out.CombinedDPS, FullDPS = out.FullDPS }
+  return result
+end
+
 return M

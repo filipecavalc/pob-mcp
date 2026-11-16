@@ -253,6 +253,16 @@ return function(BuildOps, Compat, host)
   handlers.evaluate_anoint_candidates = evaluate_anoint_candidates
   handlers.generate_weighted_trade_query = generate_weighted_trade_query
 
+  -- Compare tab (build.compareTab): comparison builds held next to the loaded one.
+  handlers.compare_list = op(BuildOps.compare_list, 'result')
+  handlers.compare_import = op(BuildOps.compare_import, 'result')
+  handlers.compare_remove = op(BuildOps.compare_remove, 'result')
+  handlers.compare_select = op(BuildOps.compare_select, 'result')
+  handlers.compare_report = op(BuildOps.compare_report, 'result')
+  handlers.compare_power_report = op(BuildOps.compare_power_report, 'result')
+  handlers.compare_buy_similar = op(BuildOps.compare_buy_similar, 'result')
+  handlers.compare_copy = op(BuildOps.compare_copy, 'result')
+
   handlers.get_capabilities = function()
     -- quit ends the stdio bridge's read loop; the desktop app's server has no such loop.
     local actions = host.mode == 'vanilla' and { 'quit' } or {}

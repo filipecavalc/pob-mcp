@@ -1821,6 +1821,20 @@ local CALC_MODES = { UNBUFFED = true, BUFFED = true, COMBAT = true, EFFECTIVE = 
 -- Minion Stats" checkbox) in the given calculation mode (its "Calculation
 -- Mode" dropdown), and put both back afterwards. Both are saved with the
 -- build, so a read must not leave them changed.
+-- The CALCS half of CalcsTab:BuildOutput: the Calcs tab's own environment
+-- and the refresh of its pinned breakdown pane. The calculation mode is read
+-- only for this pass (CalcSetup takes misc_buffMode when mode == "CALCS"),
+-- so the MAIN output, the node and misc calculators and the power report
+-- stay valid, and the power computation is not restarted.
+local function rebuildCalcsEnv(calcsTab)
+  calcsTab.calcsEnv = calcsTab.calcs.buildOutput(calcsTab.build, "CALCS")
+  calcsTab.calcsOutput = calcsTab.calcsEnv.player.output
+  if calcsTab.displayData and calcsTab.controls and calcsTab.controls.breakdown then
+    calcsTab.controls.breakdown:SetBreakdownData()
+    calcsTab.controls.breakdown:SetBreakdownData(calcsTab.displayData, calcsTab.displayPinned)
+  end
+end
+
 local function withCalcsView(params, fn)
   local calcsTab = build.calcsTab
   local mode = params.mode and tostring(params.mode):upper() or nil
@@ -1829,12 +1843,14 @@ local function withCalcsView(params, fn)
   end
   local previousMinion, previousMode = calcsTab.input.showMinion, calcsTab.input.misc_buffMode
   local modeChanged = mode ~= nil and mode ~= previousMode
-  if modeChanged then
-    calcsTab.input.misc_buffMode = mode
-    calcsTab:BuildOutput()
-  end
-  calcsTab.input.showMinion = params.minion == true or nil
+  -- Everything that changes the tab runs under pcall, so the mode, the
+  -- minion box and calcsEnv are put back even when a calculation throws.
   local ok, a, b = pcall(function()
+    if modeChanged then
+      calcsTab.input.misc_buffMode = mode
+      rebuildCalcsEnv(calcsTab)
+    end
+    calcsTab.input.showMinion = params.minion == true or nil
     if params.minion == true and not (calcsTab.calcsEnv and calcsTab.calcsEnv.minion) then
       error("the Calcs tab's skill has no minion, so there are no minion stats to show", 0)
     end
@@ -1843,7 +1859,11 @@ local function withCalcsView(params, fn)
   calcsTab.input.showMinion = previousMinion
   if modeChanged then
     calcsTab.input.misc_buffMode = previousMode
-    calcsTab:BuildOutput()
+    local restored, restoreErr = pcall(rebuildCalcsEnv, calcsTab)
+    if not restored then
+      return nil, 'the Calcs tab mode was put back, but recalculating it failed: ' .. tostring(restoreErr)
+        .. (ok and '' or ('; the read itself failed: ' .. tostring(a)))
+    end
   end
   if not ok then return nil, tostring(a) end
   return a, b
@@ -2253,7 +2273,15 @@ function M.party_import(params)
   partyTab.importCodeXML = xmlText
   partyTab.importCodeValid = true
   partyTab.importCodeDetail = colorCodes.POSITIVE .. 'Code is valid'
-  partyTab.controls.importCodeGo.onClick()
+  local clicked, clickErr = pcall(partyTab.controls.importCodeGo.onClick)
+  -- Leave the code box state as an empty box has it (importCodeHandle("")),
+  -- so the window does not show "Code is valid" with Import enabled for a
+  -- code that was never typed into it.
+  partyTab.importCodeXML = nil
+  partyTab.importCodeValid = false
+  partyTab.importCodeDetail = ''
+  partyTab.importCodeSite = nil
+  if not clicked then return nil, 'party import failed: ' .. tostring(clickErr) end
   recalcAfterPartyChange()
   local state = M.party_get()
   state.exportedSections = exported

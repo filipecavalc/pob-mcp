@@ -1,11 +1,14 @@
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import {
   handleListBuildFolder, handleCreateBuildFolder, handleRenameBuild, handleMoveBuild, handleCopyBuild, handleDeleteBuild,
   naturalCompare, sortList, filterList, scanFolder, validateEntryName, resolveInBuilds, type BuildListEntry,
+  openBuildFilesOf, withOpenBuilds,
 } from '../../src/handlers/buildFolderHandlers.js';
+import { PoBGuiApiClient } from '../../src/pobGuiClient.js';
+import { BuildService } from '../../src/services/buildService.js';
 import { textOf } from '../helpers/response.js';
 
 const buildXml = (level: number, className: string, ascend: string) =>
@@ -15,13 +18,16 @@ describe('build folder tools', () => {
   let root: string;
   let builds: string;
   let invalidated: string[];
-  const ctx = () => ({ pobDirectory: builds, buildService: { invalidateBuild: (name: string) => { invalidated.push(name); } } });
+  let openFiles: string[];
+  const ctx = () => ({ pobDirectory: builds, openBuildFiles: async () => openFiles,
+    buildService: { invalidatePathsUnder: (p: string) => { invalidated.push(path.relative(builds, p).split(path.sep).join('/')); } } });
   const exists = (rel: string) => fs.stat(path.join(builds, rel)).then(() => true, () => false);
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'pob-folders-'));
     builds = path.join(root, 'Builds');
     invalidated = [];
+    openFiles = [];
     await fs.mkdir(path.join(builds, 'Leagues', 'Old'), { recursive: true });
     await fs.writeFile(path.join(builds, 'RF atual.xml'), buildXml(84, 'Marauder', 'Chieftain'));
     await fs.writeFile(path.join(builds, 'Leagues', 'Support.xml'), buildXml(90, 'Templar', 'None'));
@@ -95,7 +101,7 @@ describe('build folder tools', () => {
     expect(await exists('Leagues/Old/RF old.xml')).toBe(true);
     await handleDeleteBuild(ctx(), { path: 'Leagues', confirm: true });
     expect(await exists('Leagues')).toBe(false);
-    expect(invalidated.sort()).toEqual(['Leagues/Old/RF old.xml', 'Leagues/Support.xml']);
+    expect(invalidated).toEqual(['Leagues']);
     await handleDeleteBuild(ctx(), { path: 'RF atual', confirm: true });
     expect(await exists('RF atual.xml')).toBe(false);
   });
@@ -119,8 +125,8 @@ describe('build folder tools', () => {
     } catch {
       return; // links not creatable here; the lexical checks above still apply
     }
-    await expect(resolveInBuilds('Link/secret.xml', builds)).rejects.toThrow(/outside the builds directory/);
-    await expect(handleDeleteBuild(ctx(), { path: 'Link/secret.xml', confirm: true })).rejects.toThrow(/outside/);
+    await expect(resolveInBuilds('Link/secret.xml', builds)).rejects.toThrow(/is a link/);
+    await expect(handleDeleteBuild(ctx(), { path: 'Link/secret.xml', confirm: true })).rejects.toThrow(/is a link/);
     expect(await fs.readFile(path.join(outsideDir, 'secret.xml'), 'utf8')).toBe('x');
   });
 });
@@ -160,5 +166,146 @@ describe('PoB build list helpers', () => {
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('build folder tools: review fixes', () => {
+  let root: string;
+  let builds: string;
+  let openFiles: string[];
+  const ctx = () => ({ pobDirectory: builds, openBuildFiles: async () => openFiles });
+  const exists = (rel: string) => fs.stat(path.join(builds, rel)).then(() => true, () => false);
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'pob-folders2-'));
+    builds = path.join(root, 'Builds');
+    openFiles = [];
+    await fs.mkdir(path.join(builds, 'Leagues', 'Old'), { recursive: true });
+    await fs.writeFile(path.join(builds, 'RF atual.xml'), buildXml(84, 'Marauder', 'Chieftain'));
+    await fs.writeFile(path.join(builds, 'Leagues', 'Support.xml'), buildXml(90, 'Templar', 'None'));
+    await fs.writeFile(path.join(builds, 'Leagues', 'Old', 'RF old.xml'), buildXml(70, 'Marauder', 'Chieftain'));
+  });
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  describe('the open build', () => {
+    it('refuses to rename, move or delete the loaded build, or a folder holding it, but lets it be copied', async () => {
+      openFiles = [path.join(builds, 'Leagues', 'Old', 'RF old.xml')];
+      await expect(handleRenameBuild(ctx(), { path: 'Leagues/Old/RF old', newName: 'RF older' })).rejects.toThrow(/is the one that is open.*Load or open another build first/s);
+      await expect(handleMoveBuild(ctx(), { path: 'Leagues/Old/RF old.xml', toFolder: '' })).rejects.toThrow(/open/);
+      await expect(handleDeleteBuild(ctx(), { path: 'Leagues/Old/RF old', confirm: true })).rejects.toThrow(/open/);
+      await expect(handleDeleteBuild(ctx(), { path: 'Leagues', confirm: true })).rejects.toThrow(/folder "Leagues" holds the build that is open/);
+      await expect(handleRenameBuild(ctx(), { path: 'Leagues/Old', newName: 'Older' })).rejects.toThrow(/holds the build that is open/);
+      expect(await exists('Leagues/Old/RF old.xml')).toBe(true);
+      await handleCopyBuild(ctx(), { path: 'Leagues/Old/RF old', newName: 'RF copy' });
+      expect(await exists('Leagues/Old/RF copy.xml')).toBe(true);
+      await handleRenameBuild(ctx(), { path: 'RF atual', newName: 'RF other' });
+    });
+
+    it('compares the open file case-insensitively on Windows', async () => {
+      if (process.platform !== 'win32') return;
+      openFiles = [path.join(builds, 'rf ATUAL.xml')];
+      await expect(handleDeleteBuild(ctx(), { path: 'RF atual', confirm: true })).rejects.toThrow(/open/);
+    });
+
+    it('reads the open build from the headless client, or from the window when the tools run on it', async () => {
+      expect(await openBuildFilesOf(() => null)).toEqual([]);
+      const dead = { isAlive: () => false, getLoadedFilePath: () => 'x.xml' };
+      expect(await openBuildFilesOf(() => dead as never)).toEqual([]);
+      const headless = { isAlive: () => true, getLoadedFilePath: () => path.join(builds, 'RF atual.xml') };
+      expect(await openBuildFilesOf(() => headless as never)).toEqual([path.join(builds, 'RF atual.xml')]);
+      const gui = Object.assign(Object.create(PoBGuiApiClient.prototype), {
+        isAlive: () => true, guiStatus: async () => ({ build: { file: path.join(builds, 'Leagues', 'Support.xml') } }),
+      });
+      expect(await openBuildFilesOf(() => gui)).toEqual([path.join(builds, 'Leagues', 'Support.xml')]);
+      const unreachable = Object.assign(Object.create(PoBGuiApiClient.prototype), {
+        isAlive: () => true, guiStatus: async () => { throw new Error('timed out'); },
+      });
+      await expect(openBuildFilesOf(() => unreachable)).rejects.toThrow(/cannot tell which build is open/);
+      const wrapped = withOpenBuilds({ pobDirectory: builds }, () => headless as never);
+      await expect(handleMoveBuild(wrapped, { path: 'RF atual', toFolder: 'Leagues' })).rejects.toThrow(/open/);
+    });
+  });
+
+  it('refuses a name that is both a folder and a build, and takes "X.xml" or "X/"', async () => {
+    await fs.mkdir(path.join(builds, 'RF atual'));
+    await fs.writeFile(path.join(builds, 'RF atual', 'inner.xml'), 'x');
+    for (const call of [
+      () => handleDeleteBuild(ctx(), { path: 'RF atual', confirm: true }),
+      () => handleMoveBuild(ctx(), { path: 'RF atual', toFolder: 'Leagues' }),
+      () => handleRenameBuild(ctx(), { path: 'RF atual', newName: 'Other' }),
+    ]) await expect(call()).rejects.toThrow(/names both the folder "RF atual\/" and the build "RF atual.xml"/);
+    expect(textOf(await handleDeleteBuild(ctx(), { path: 'RF atual/' }))).toContain('folder "RF atual" and everything in it');
+    expect(textOf(await handleDeleteBuild(ctx(), { path: 'RF atual.xml' }))).toContain('build "RF atual.xml"');
+    await expect(handleDeleteBuild(ctx(), { path: 'Leagues/Support/' })).rejects.toThrow(/no folder/);
+    expect(await exists('RF atual/inner.xml')).toBe(true);
+  });
+
+  it('removes a partial folder copy when copying fails', async () => {
+    const spy = jest.spyOn(fs, 'cp').mockImplementation(async (_src, dest) => {
+      await fs.writeFile(path.join(String(dest), 'half.xml'), 'partial');
+      throw new Error('disk full');
+    });
+    await expect(handleCopyBuild(ctx(), { path: 'Leagues', newName: 'Leagues copy' })).rejects.toThrow(/partial copy "Leagues copy" was removed: disk full/);
+    expect(spy).toHaveBeenCalled();
+    expect(await exists('Leagues copy')).toBe(false);
+    expect(await exists('Leagues/Support.xml')).toBe(true);
+  });
+
+  it('rejects Windows reserved names and names ending in a dot or a space', async () => {
+    for (const bad of ['CON', 'con', 'Nul.txt', 'COM1', 'lpt9.xml', 'aux.', 'name.', 'name ']) {
+      expect(() => validateEntryName(bad, 'name')).toThrow();
+    }
+    expect(validateEntryName('Console', 'name')).toBe('Console');
+    expect(validateEntryName('COM10', 'name')).toBe('COM10');
+    await expect(handleCreateBuildFolder(ctx(), { name: 'PRN' })).rejects.toThrow(/reserves/);
+    await expect(handleRenameBuild(ctx(), { path: 'RF atual', newName: 'NUL' })).rejects.toThrow(/reserves/);
+    await expect(handleRenameBuild(ctx(), { path: 'RF atual', newName: 'CON.xml' })).rejects.toThrow(/reserves/);
+    await expect(handleCopyBuild(ctx(), { path: 'RF atual', newName: 'trailing.' })).rejects.toThrow(/dot or a space/);
+    await expect(handleRenameBuild(ctx(), { path: 'Leagues', newName: 'LPT1' })).rejects.toThrow(/reserves/);
+  });
+
+  describe('case', () => {
+    it('treats a folder named in another case as the same folder on Windows', async () => {
+      if (process.platform !== 'win32') return;
+      await expect(handleMoveBuild(ctx(), { path: 'Leagues/Support', toFolder: 'leagues' })).rejects.toThrow(/already in/);
+      await expect(handleMoveBuild(ctx(), { path: 'Leagues', toFolder: 'LEAGUES/old' })).rejects.toThrow(/cannot be moved into itself/);
+      await expect(handleCopyBuild(ctx(), { path: 'Leagues', toFolder: 'leagues/OLD' })).rejects.toThrow(/cannot be copied into itself/);
+      await expect(handleCopyBuild(ctx(), { path: 'Leagues/Support', toFolder: 'LEAGUES' })).rejects.toThrow(/new_name is required/);
+    });
+
+    it('refuses a case-only rename onto a different entry that has that exact name', async () => {
+      const realReaddir = fs.readdir;
+      jest.spyOn(fs, 'readdir').mockImplementation((async (dir: string, opts?: unknown) => {
+        const list = await (realReaddir as (d: string, o?: unknown) => Promise<unknown[]>)(dir, opts);
+        return path.resolve(dir) === path.resolve(builds) && !opts ? [...list, 'rf ATUAL.xml'] : list;
+      }) as never);
+      await expect(handleRenameBuild(ctx(), { path: 'RF atual', newName: 'rf ATUAL' })).rejects.toThrow(/already exists/);
+      expect(await exists('RF atual.xml')).toBe(true);
+    });
+
+    it('drops cached builds below a path in any case', () => {
+      const service = new BuildService(builds) as unknown as { buildCache: Map<string, unknown>; invalidatePathsUnder(p: string): void };
+      const cased = process.platform === 'win32' ? path.join(builds, 'LEAGUES', 'support.xml') : path.join(builds, 'Leagues', 'Support.xml');
+      service.buildCache.set(cased, {});
+      service.buildCache.set(path.join(builds, 'LeaguesX.xml'), {});
+      service.invalidatePathsUnder(path.join(builds, 'Leagues'));
+      expect([...service.buildCache.keys()]).toEqual([path.join(builds, 'LeaguesX.xml')]);
+    });
+  });
+
+  it('refuses to act on a link, even one pointing inside the builds directory', async () => {
+    try {
+      await fs.symlink(path.join(builds, 'Leagues'), path.join(builds, 'Shortcut'), 'junction');
+    } catch {
+      return;
+    }
+    await expect(handleDeleteBuild(ctx(), { path: 'Shortcut', confirm: true })).rejects.toThrow(/"Shortcut" is a link/);
+    await expect(handleMoveBuild(ctx(), { path: 'RF atual', toFolder: 'Shortcut' })).rejects.toThrow(/is a link/);
+    await expect(handleCopyBuild(ctx(), { path: 'Shortcut/Support' })).rejects.toThrow(/is a link/);
+    expect(textOf(await handleListBuildFolder(ctx(), {}))).not.toContain('Shortcut');
+    expect(await exists('Leagues/Support.xml')).toBe(true);
   });
 });

@@ -40,7 +40,7 @@ import { handleFindItemUpgrades as handleFindItemUpgradesNew } from "../handlers
 import { handleClassifyItemAffixes, handleListCraftableMods, handleFindAffixTiers } from "../handlers/affixHandlers.js";
 import { handleListCalcBreakdowns, handleGetCalcBreakdown } from "../handlers/calcBreakdownHandlers.js";
 import { handleGetParty, handlePartyImport, handlePartyClear, handlePartyDisableEffects, handlePartyRebuild, handleSetPartyExportSupport } from "../handlers/partyHandlers.js";
-import { handleListBuildFolder, handleCreateBuildFolder, handleRenameBuild, handleMoveBuild, handleCopyBuild, handleDeleteBuild } from "../handlers/buildFolderHandlers.js";
+import { handleListBuildFolder, handleCreateBuildFolder, handleRenameBuild, handleMoveBuild, handleCopyBuild, handleDeleteBuild, withOpenBuilds } from "../handlers/buildFolderHandlers.js";
 
 export interface ToolRouterDependencies {
   contextBuilder: ContextBuilder;
@@ -885,30 +885,30 @@ export async function routeToolCall(
 
     // Build folder management (files only, no open build needed)
     case "list_build_folder":
-      return await handleListBuildFolder(handlerContext, {
+      return await handleListBuildFolder(withOpenBuilds(handlerContext, deps.getLuaClient), {
         path: args?.path as string | undefined,
         filter: args?.filter as string | undefined,
         sort: args?.sort as string | undefined,
       });
 
     case "create_build_folder":
-      return await handleCreateBuildFolder(handlerContext, { name: args?.name as string, path: args?.path as string | undefined });
+      return await handleCreateBuildFolder(withOpenBuilds(handlerContext, deps.getLuaClient), { name: args?.name as string, path: args?.path as string | undefined });
 
     case "rename_build":
-      return await handleRenameBuild(handlerContext, { path: args?.path as string, newName: args?.new_name as string });
+      return await handleRenameBuild(withOpenBuilds(handlerContext, deps.getLuaClient), { path: args?.path as string, newName: args?.new_name as string });
 
     case "move_build":
-      return await handleMoveBuild(handlerContext, { path: args?.path as string, toFolder: args?.to_folder as string | undefined });
+      return await handleMoveBuild(withOpenBuilds(handlerContext, deps.getLuaClient), { path: args?.path as string, toFolder: args?.to_folder as string | undefined });
 
     case "copy_build":
-      return await handleCopyBuild(handlerContext, {
+      return await handleCopyBuild(withOpenBuilds(handlerContext, deps.getLuaClient), {
         path: args?.path as string,
         newName: args?.new_name as string | undefined,
         toFolder: args?.to_folder as string | undefined,
       });
 
     case "delete_build":
-      return await handleDeleteBuild(handlerContext, { path: args?.path as string, confirm: args?.confirm === true });
+      return await handleDeleteBuild(withOpenBuilds(handlerContext, deps.getLuaClient), { path: args?.path as string, confirm: args?.confirm === true });
 
     default:
       throw new Error(`Unknown tool: ${name}`);

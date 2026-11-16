@@ -3,6 +3,8 @@ import { constants as fsConstants } from "fs";
 import path from "path";
 import { wrapHandler } from "../utils/errorHandling.js";
 import { sanitizeBuildName } from "../utils/pathSanitizer.js";
+import type { PoBLuaApiClient } from "../pobLuaBridge.js";
+import { PoBGuiApiClient } from "../pobGuiClient.js";
 
 /**
  * Build folder management as PoB's build list does it (Modules/BuildList.lua,
@@ -14,14 +16,21 @@ import { sanitizeBuildName } from "../utils/pathSanitizer.js";
  * the headless engine cannot do them, because HeadlessWrapper.lua stubs
  * NewFileSearch, MakeDir and RemoveDir (they return nothing), which PoB's
  * build list relies on for every listing and folder change. The behaviour
- * follows PoB's, with two deliberate differences: nothing is ever
- * overwritten (PoB's rename and copy dialogs refuse an existing name too, but
- * its folder moves would merge), and deleting needs confirm: true.
+ * follows PoB's, with deliberate differences for safety:
+ * - nothing is ever overwritten (PoB's rename and copy dialogs refuse an
+ *   existing name too, but its folder moves would merge);
+ * - deleting needs confirm: true;
+ * - links are refused (the listing skips them, as they are not folders);
+ * - the build loaded in the engine, or open in the window, cannot be
+ *   renamed, moved or deleted: PoB's build list is only reachable with no
+ *   build open, and a later save would write to the old name.
  */
 
 export interface BuildFolderContext {
   pobDirectory: string;
-  buildService?: { invalidateBuild(buildName: string): void };
+  buildService?: { invalidatePathsUnder(absPath: string): void };
+  /** Absolute paths of the builds open right now (loaded in the engine, or open in the window). */
+  openBuildFiles?: () => Promise<string[]>;
 }
 
 /** One entry of ScanFolder's index (BuildListHelpers.lua). */
@@ -41,15 +50,55 @@ export interface BuildListEntry {
 
 export type BuildSortMode = 'NAME' | 'CLASS' | 'EDITED' | 'LEVEL';
 
+const CASE_INSENSITIVE = process.platform === 'win32';
+const fold = (p: string) => (CASE_INSENSITIVE ? p.toLowerCase() : p);
+/** Two paths name the same entry (Windows file names ignore case). */
+export const samePath = (a: string, b: string) => fold(a) === fold(b);
+/** child is inside folder (or is folder itself), comparing as the file system does. */
+export const isWithin = (child: string, folder: string, sep = '/') =>
+  samePath(child, folder) || fold(child).startsWith(fold(folder) + sep);
+
+/**
+ * The builds open right now, whose files the folder tools must not rename,
+ * move or delete: the file the headless engine loaded and saves to, or the
+ * file open in the Path of Building window when the tools run on it. Does not
+ * start an engine; when none runs, nothing is open.
+ */
+export async function openBuildFilesOf(getLuaClient: () => PoBLuaApiClient | null): Promise<string[]> {
+  const client = getLuaClient();
+  if (!client || !client.isAlive()) return [];
+  if (client instanceof PoBGuiApiClient) {
+    let status: Record<string, unknown>;
+    try {
+      status = await client.guiStatus();
+    } catch (error) {
+      throw new Error(`cannot tell which build is open in the Path of Building window (${error instanceof Error ? error.message : String(error)}); try again, or switch to the headless engine`);
+    }
+    const file = (status.build as { file?: unknown } | undefined)?.file;
+    return typeof file === 'string' && file !== '' ? [path.resolve(file)] : [];
+  }
+  const loaded = client.getLoadedFilePath();
+  return loaded ? [path.resolve(loaded)] : [];
+}
+
+/** A folder tool context that knows which builds are open, so it refuses to rename, move or delete them. */
+export function withOpenBuilds<T extends Omit<BuildFolderContext, 'openBuildFiles'>>(base: T, getLuaClient: () => PoBLuaApiClient | null): T & BuildFolderContext {
+  return { ...base, openBuildFiles: () => openBuildFilesOf(getLuaClient) };
+}
+
 // The characters the rename, copy and new folder dialogs filter out of a
 // name: EditControl filter "\\/:%*%?\"<>|%c".
 const FORBIDDEN_NAME = /[\\/:*?"<>|\x00-\x1f\x7f]/;
+// Names Windows reserves for devices, with or without an extension.
+const RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 
-/** A file or folder name for the builds directory, checked as PoB's dialogs check it. */
+/** A file or folder name for the builds directory, checked as PoB's dialogs check it, plus Windows' rules. */
 export function validateEntryName(name: unknown, what: string): string {
   if (typeof name !== 'string' || !/\S/.test(name)) throw new Error(`${what} must be a non-empty name`);
   if (FORBIDDEN_NAME.test(name)) throw new Error(`${what} may not contain \\ / : * ? " < > | or control characters`);
   if (name === '.' || name === '..') throw new Error(`${what} may not be "." or ".."`);
+  if (/[. ]$/.test(name)) throw new Error(`${what} may not end with a dot or a space (Windows drops them)`);
+  if (RESERVED_NAME.test(name)) throw new Error(`${what} "${name}" is a name Windows reserves for a device`);
   if (name.length > 100) throw new Error(`${what} is longer than 100 characters`);
   return name;
 }
@@ -58,10 +107,18 @@ function toRel(relPath: string | undefined): string {
   return (relPath ?? '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').replace(/^\.$/, '');
 }
 
+async function lstatOrUndefined(full: string) {
+  try { return await fs.lstat(full); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
 /**
  * Resolve a path relative to the builds directory. Rejects anything that
- * leaves it (sanitizeBuildName), and also a path that reaches outside through
- * a link: the nearest existing ancestor must really be inside the directory.
+ * leaves it (sanitizeBuildName), any link on the way (symlink or junction:
+ * the build list does not list them, and they may point anywhere), and,
+ * as a last guard, a real path outside the directory.
  */
 export async function resolveInBuilds(relPath: string | undefined, baseDir: string, opts: { allowRoot?: boolean } = {}): Promise<{ rel: string; full: string }> {
   const rel = toRel(relPath);
@@ -70,12 +127,21 @@ export async function resolveInBuilds(relPath: string | undefined, baseDir: stri
     return { rel, full: path.resolve(baseDir) };
   }
   const full = sanitizeBuildName(rel, baseDir);
+  let probe = path.resolve(baseDir);
+  for (const part of rel.split('/')) {
+    probe = path.join(probe, part);
+    const stat = await lstatOrUndefined(probe);
+    if (!stat) break;
+    if (stat.isSymbolicLink()) {
+      throw new Error(`"${path.relative(baseDir, probe).replace(/\\/g, '/')}" is a link; the build list does not show links, so these tools do not act on them or through them`);
+    }
+  }
   const realBase = await fs.realpath(baseDir);
-  let probe = full;
+  probe = full;
   for (;;) {
     try {
       const real = await fs.realpath(probe);
-      if (real !== realBase && !real.startsWith(realBase + path.sep)) throw new Error('Path resolves outside the builds directory');
+      if (!isWithin(real, realBase, path.sep)) throw new Error('Path resolves outside the builds directory');
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -246,7 +312,7 @@ export async function handleCreateBuildFolder(context: BuildFolderContext, args:
     const parent = await resolveInBuilds(args.path, context.pobDirectory, { allowRoot: true });
     if (!(await statOrUndefined(parent.full))?.isDirectory()) throw new Error(`no folder "${parent.rel}" in the builds directory`);
     const target = await resolveInBuilds(parent.rel === '' ? name : `${parent.rel}/${name}`, context.pobDirectory);
-    if (await statOrUndefined(target.full)) throw new Error(`"${target.rel}" already exists`);
+    if (await lstatOrUndefined(target.full)) throw new Error(`"${target.rel}" already exists`);
     await fs.mkdir(target.full);
     return { content: [{ type: "text" as const, text: `Created folder "${target.rel}".` }] };
   });
@@ -254,14 +320,26 @@ export async function handleCreateBuildFolder(context: BuildFolderContext, args:
 
 interface ResolvedEntry { rel: string; full: string; isFolder: boolean; parentRel: string; baseName: string }
 
+/**
+ * The build or folder a path names. "RF" may be the build RF.xml or the
+ * folder RF; when both exist it is refused as ambiguous, so a delete never
+ * takes a whole folder for a build. "RF.xml" names the build, "RF/" the folder.
+ */
 async function resolveEntry(context: BuildFolderContext, relPath: string | undefined): Promise<ResolvedEntry> {
   if (typeof relPath !== 'string' || toRel(relPath) === '') throw new Error('path is required');
+  const wantFolder = /[\\/]\s*$/.test(relPath);
   let resolved = await resolveInBuilds(relPath, context.pobDirectory);
   let stat = await statOrUndefined(resolved.full);
-  // Build names are routinely given without .xml, as list_builds and the other tools accept.
-  if (!stat && !/\.xml$/i.test(resolved.rel)) {
-    resolved = await resolveInBuilds(`${resolved.rel}.xml`, context.pobDirectory);
-    stat = await statOrUndefined(resolved.full);
+  if (wantFolder) {
+    if (!stat?.isDirectory()) throw new Error(`no folder "${resolved.rel}" in the builds directory`);
+  } else if (!/\.xml$/i.test(resolved.rel)) {
+    // Build names are routinely given without .xml, as list_builds and the other tools accept.
+    const asBuild = await resolveInBuilds(`${resolved.rel}.xml`, context.pobDirectory);
+    const buildStat = await statOrUndefined(asBuild.full);
+    if (stat?.isDirectory() && buildStat?.isFile()) {
+      throw new Error(`"${resolved.rel}" names both the folder "${resolved.rel}/" and the build "${asBuild.rel}"; pass "${asBuild.rel}" for the build or "${resolved.rel}/" for the folder`);
+    }
+    if (!stat && buildStat) { resolved = asBuild; stat = buildStat; }
   }
   if (!stat) throw new Error(`no build or folder "${toRel(relPath)}" in the builds directory`);
   const isFolder = stat.isDirectory();
@@ -270,9 +348,23 @@ async function resolveEntry(context: BuildFolderContext, relPath: string | undef
   return { ...resolved, isFolder, parentRel: slash < 0 ? '' : resolved.rel.slice(0, slash), baseName: slash < 0 ? resolved.rel : resolved.rel.slice(slash + 1) };
 }
 
+/**
+ * Refuse to rename, move or delete the build that is open, or a folder
+ * holding it: a later save would write to the old name (and could replace a
+ * file now there), and PoB itself only offers these with no build open.
+ */
+async function refuseOpenBuild(context: BuildFolderContext, entry: ResolvedEntry, verb: string) {
+  const open = context.openBuildFiles ? await context.openBuildFiles() : [];
+  const hit = open.find((file) => (entry.isFolder ? isWithin(file, entry.full, path.sep) : samePath(file, entry.full)));
+  if (hit) {
+    const what = entry.isFolder ? `folder "${entry.rel}" holds the build that is open (${path.basename(hit)})` : `build "${entry.rel}" is the one that is open`;
+    throw new Error(`Cannot ${verb}: the ${what} in the Lua engine or the Path of Building window. Load or open another build first (PoB's build list also works only with no build open).`);
+  }
+}
+
 const join = (folder: string, name: string) => (folder === '' ? name : `${folder}/${name}`);
 
-/** Every build file below a folder (or the file itself), for cache invalidation and reports. */
+/** Every build file below a folder (or the file itself), for reports. */
 async function buildFilesIn(entry: ResolvedEntry): Promise<string[]> {
   if (!entry.isFolder) return [entry.rel];
   const found: string[] = [];
@@ -286,8 +378,8 @@ async function buildFilesIn(entry: ResolvedEntry): Promise<string[]> {
   return found;
 }
 
-function invalidate(context: BuildFolderContext, rels: string[]) {
-  for (const rel of rels) context.buildService?.invalidateBuild(rel);
+function invalidate(context: BuildFolderContext, entry: ResolvedEntry) {
+  context.buildService?.invalidatePathsUnder(entry.full);
 }
 
 /** A new build name as the rename dialog takes it: without .xml, which it adds. */
@@ -299,15 +391,15 @@ function newBuildFileName(newName: unknown): string {
 /** listMode:GetDestName (BuildList.lua): "name.xml", else "name[2].xml", "name[3].xml", ... */
 export async function freeDestName(folderFull: string, fileName: string): Promise<string> {
   let destName = fileName;
-  for (let i = 2; await statOrUndefined(path.join(folderFull, destName)); i++) {
+  for (let i = 2; await lstatOrUndefined(path.join(folderFull, destName)); i++) {
     destName = `${fileName.replace(/\.xml$/i, '')}[${i}].xml`;
   }
   return destName;
 }
 
-/** CanMoveToSubPath (BuildListHelpers.lua): not where it is, and a folder not into itself. */
+/** CanMoveToSubPath (BuildListHelpers.lua): a folder not into itself or below itself. */
 function checkCanMoveTo(entry: ResolvedEntry, targetRel: string, verb: string) {
-  if (entry.isFolder && (targetRel === entry.rel || targetRel.startsWith(`${entry.rel}/`))) {
+  if (entry.isFolder && isWithin(targetRel, entry.rel)) {
     throw new Error(`A folder cannot be ${verb} into itself.`);
   }
 }
@@ -317,15 +409,19 @@ export async function handleRenameBuild(context: BuildFolderContext, args: { pat
   return wrapHandler('rename build', async () => {
     const entry = await resolveEntry(context, args.path);
     const newBase = entry.isFolder ? validateEntryName(args.newName, 'new_name') : newBuildFileName(args.newName);
+    if (newBase === entry.baseName) throw new Error('the new name is the same as the current one');
+    await refuseOpenBuild(context, entry, 'rename it');
     const target = await resolveInBuilds(join(entry.parentRel, newBase), context.pobDirectory);
     const caseOnly = newBase.toLowerCase() === entry.baseName.toLowerCase();
-    if (newBase === entry.baseName) throw new Error('the new name is the same as the current one');
-    // The dialog's Save stays disabled while another file has the name; a
-    // change of case only is allowed.
-    if (!caseOnly && await statOrUndefined(target.full)) throw new Error(`"${target.rel}" already exists`);
-    const before = await buildFilesIn(entry);
+    // The dialog's Save stays disabled while another file has the name. A
+    // change of case only is allowed, unless a different entry carries that
+    // exact name (possible where names are case-sensitive).
+    const siblings = await fs.readdir(path.dirname(entry.full));
+    if (caseOnly ? siblings.includes(newBase) : await lstatOrUndefined(target.full)) {
+      throw new Error(`"${target.rel}" already exists`);
+    }
     await fs.rename(entry.full, target.full);
-    invalidate(context, before);
+    invalidate(context, entry);
     return { content: [{ type: "text" as const, text: `Renamed ${entry.isFolder ? 'folder' : 'build'} "${entry.rel}" to "${target.rel}".` }] };
   });
 }
@@ -340,19 +436,19 @@ export async function handleMoveBuild(context: BuildFolderContext, args: { path:
     const entry = await resolveEntry(context, args.path);
     const target = await resolveInBuilds(args.toFolder, context.pobDirectory, { allowRoot: true });
     if (!(await statOrUndefined(target.full))?.isDirectory()) throw new Error(`no folder "${target.rel}" in the builds directory`);
-    if (target.rel === entry.parentRel) throw new Error(`"${entry.rel}" is already in ${target.rel === '' ? 'the builds directory' : `"${target.rel}"`}`);
+    if (samePath(target.rel, entry.parentRel)) throw new Error(`"${entry.rel}" is already in ${target.rel === '' ? 'the builds directory' : `"${target.rel}"`}`);
     checkCanMoveTo(entry, target.rel, 'moved');
+    await refuseOpenBuild(context, entry, 'move it');
     let destBase = entry.baseName;
     if (entry.isFolder) {
       // main:MoveFolder would merge into an existing folder; refuse instead.
-      if (await statOrUndefined(path.join(target.full, destBase))) throw new Error(`"${join(target.rel, destBase)}" already exists`);
+      if (await lstatOrUndefined(path.join(target.full, destBase))) throw new Error(`"${join(target.rel, destBase)}" already exists`);
     } else {
       destBase = await freeDestName(target.full, entry.baseName);
     }
     const dest = await resolveInBuilds(join(target.rel, destBase), context.pobDirectory);
-    const before = await buildFilesIn(entry);
     await fs.rename(entry.full, dest.full);
-    invalidate(context, before);
+    invalidate(context, entry);
     return { content: [{ type: "text" as const, text: `Moved ${entry.isFolder ? 'folder' : 'build'} "${entry.rel}" to "${dest.rel}".` }] };
   });
 }
@@ -367,23 +463,31 @@ export async function handleCopyBuild(context: BuildFolderContext, args: { path:
     const entry = await resolveEntry(context, args.path);
     const target = await resolveInBuilds(args.toFolder ?? entry.parentRel, context.pobDirectory, { allowRoot: true });
     if (!(await statOrUndefined(target.full))?.isDirectory()) throw new Error(`no folder "${target.rel}" in the builds directory`);
-    const sameFolder = target.rel === entry.parentRel;
+    const sameFolder = samePath(target.rel, entry.parentRel);
     checkCanMoveTo(entry, target.rel, 'copied');
     let destBase: string;
     if (args.newName !== undefined && args.newName !== '') {
       destBase = entry.isFolder ? validateEntryName(args.newName, 'new_name') : newBuildFileName(args.newName);
-      if (await statOrUndefined(path.join(target.full, destBase))) throw new Error(`"${join(target.rel, destBase)}" already exists`);
+      if (await lstatOrUndefined(path.join(target.full, destBase))) throw new Error(`"${join(target.rel, destBase)}" already exists`);
     } else if (sameFolder) {
       throw new Error('new_name is required to copy within the same folder');
     } else if (entry.isFolder) {
       destBase = entry.baseName;
-      if (await statOrUndefined(path.join(target.full, destBase))) throw new Error(`"${join(target.rel, destBase)}" already exists`);
+      if (await lstatOrUndefined(path.join(target.full, destBase))) throw new Error(`"${join(target.rel, destBase)}" already exists`);
     } else {
       destBase = await freeDestName(target.full, entry.baseName);
     }
     const dest = await resolveInBuilds(join(target.rel, destBase), context.pobDirectory);
     if (entry.isFolder) {
-      await fs.cp(entry.full, dest.full, { recursive: true, errorOnExist: true, force: false });
+      // Create the folder first (fails if it appeared meanwhile), so a failed
+      // copy can remove exactly what it made and nothing that was there.
+      await fs.mkdir(dest.full);
+      try {
+        await fs.cp(entry.full, dest.full, { recursive: true, errorOnExist: true, force: false });
+      } catch (error) {
+        await fs.rm(dest.full, { recursive: true, force: true }).catch(() => undefined);
+        throw new Error(`copying the folder failed, and the partial copy "${dest.rel}" was removed: ${error instanceof Error ? error.message : String(error)}`);
+      }
     } else {
       await fs.copyFile(entry.full, dest.full, fsConstants.COPYFILE_EXCL);
     }
@@ -400,6 +504,7 @@ export async function handleCopyBuild(context: BuildFolderContext, args: { path:
 export async function handleDeleteBuild(context: BuildFolderContext, args: { path: string; confirm?: boolean }) {
   return wrapHandler('delete build', async () => {
     const entry = await resolveEntry(context, args.path);
+    await refuseOpenBuild(context, entry, 'delete it');
     const files = await buildFilesIn(entry);
     const contents = entry.isFolder ? await fs.readdir(entry.full) : [];
     const what = entry.isFolder
@@ -411,7 +516,7 @@ export async function handleDeleteBuild(context: BuildFolderContext, args: { pat
     if (!entry.isFolder) await fs.unlink(entry.full);
     else if (contents.length === 0) await fs.rmdir(entry.full);
     else await fs.rm(entry.full, { recursive: true, force: false });
-    invalidate(context, files);
+    invalidate(context, entry);
     return { content: [{ type: "text" as const, text: `Deleted the ${what}.` }] };
   });
 }

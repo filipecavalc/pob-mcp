@@ -1220,6 +1220,205 @@ export function getLuaToolSchemas(): ToolSchema[] {
         required: ["what"],
       },
     },
+    // Skills tab, config tab and minions (gem DPS ranking, skill and config
+    // sets, spectres, the main skill's minion, custom modifiers).
+    {
+      name: "rank_gems_by_dps",
+      truncatable: true,
+      description: "Rank the gems Path of Building offers for one gem slot of a socket group by the DPS PoB itself calculates with each gem there: PoB's Skills tab gem dropdown with 'Sort gems by DPS' on. Gives each candidate's DPS and the change from the current build. Support gems that cannot support the group's skills are not calculated. With the default fields the DPS is the main skill's, as in PoB. Reads only; the build is unchanged. Requires a loaded build.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          group_index: { type: "number", description: "Socket group (1-based, as in get_skill_setup). Default: the main socket group." },
+          gem_index: { type: "number", description: "Gem slot to fill (1-based). A slot holding a gem ranks replacements for it; the default is the empty slot after the last gem." },
+          dps_field: { type: "string", enum: ["FullDPS", "CombinedDPS", "TotalDPS", "AverageDamage", "TotalDot", "BleedDPS", "IgniteDPS", "TotalPoisonDPS", "TotalEHP"], description: "Stat to sort by (PoB's sort field). Default: the build's own setting (usually CombinedDPS)." },
+          gem_type: { type: "string", enum: ["support", "active", "all"], description: "Which gems the dropdown lists (its S/A filter). Default: support." },
+          search: { type: "string", description: "PoB's gem search text, e.g. 'fire' or ':fire:-aura'. Default: all gems." },
+          default_gem_level: { type: "string", enum: ["normalMaximum", "corruptedMaximum", "awakenedMaximum", "characterLevel", "levelOne"], description: "Level candidates are tried at (PoB's 'Default gem level'). Default: the build's setting." },
+          default_gem_quality: { type: "number", description: "Quality candidates are tried at, 0-23. Default: the build's setting." },
+          show_support_types: { type: "string", enum: ["ALL", "NORMAL", "EXCEPTIONAL"], description: "PoB's 'Show support gems' option. Default: the build's setting." },
+          show_legacy_gems: { type: "boolean", description: "PoB's 'Show legacy gems' option. Default: the build's setting." },
+          include_unevaluated: { type: "boolean", description: "Also list gems PoB does not calculate (default false)." },
+          limit: { type: "number", description: "Candidates to return, 1-500 (default 25)." },
+        },
+      },
+    },
+    {
+      name: "list_skill_sets",
+      description: "List the build's skill sets (Skills tab 'Skill set' / Manage...), with ids and which one is active.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "select_skill_set",
+      description: "Switch the active skill set, as double-clicking it in PoB's Manage Skill Sets. Stats are recalculated. Selecting the set already active changes nothing.",
+      inputSchema: {
+        type: "object",
+        properties: { id: { type: "number", description: "Skill set id (see list_skill_sets)" } },
+        required: ["id"],
+      },
+    },
+    {
+      name: "create_skill_set",
+      description: "Create a skill set: an empty one (PoB's New) or a copy of another (Copy). Like PoB, it does not switch to it unless activate is true.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Name of the new skill set (1-100 characters)" },
+          copy_from: { type: "number", description: "Skill set id to copy (optional; omit for an empty set)" },
+          activate: { type: "boolean", description: "Switch to the new set (default false)" },
+        },
+        required: ["title"],
+      },
+    },
+    {
+      name: "rename_skill_set",
+      description: "Rename a skill set.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "number", description: "Skill set id (see list_skill_sets)" },
+          title: { type: "string", description: "New name (1-100 characters)" },
+        },
+        required: ["id", "title"],
+      },
+    },
+    {
+      name: "delete_skill_set",
+      description: "Delete a skill set and its socket groups. The last set cannot be deleted; deleting the active set switches to the one above it. Needs confirm: true.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "number", description: "Skill set id (see list_skill_sets)" },
+          confirm: { type: "boolean", description: "Must be true to delete" },
+        },
+        required: ["id", "confirm"],
+      },
+    },
+    {
+      name: "list_config_sets",
+      description: "List the config sets stored inside the build (Configuration tab 'Config set' / Manage...), with ids and which one is active. get_config, set_config and the custom modifier tools work on the active set. Not the preset files of save_config_preset / list_config_presets.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "select_config_set",
+      description: "Switch the active config set stored inside the build, as double-clicking it in PoB's Manage Config Sets. Stats are recalculated. Selecting the set already active changes nothing. For preset files, use load_config_preset.",
+      inputSchema: {
+        type: "object",
+        properties: { id: { type: "number", description: "Config set id (see list_config_sets)" } },
+        required: ["id"],
+      },
+    },
+    {
+      name: "create_config_set",
+      description: "Create a config set stored inside the build (saved with it): one with PoB's default settings (New) or a copy of another (Copy). Like PoB, it does not switch to it unless activate is true. Unlike save_config_preset, which writes a separate preset file.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Name of the new config set (1-100 characters)" },
+          copy_from: { type: "number", description: "Config set id to copy (optional)" },
+          activate: { type: "boolean", description: "Switch to the new set (default false)" },
+        },
+        required: ["title"],
+      },
+    },
+    {
+      name: "rename_config_set",
+      description: "Rename a config set.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "number", description: "Config set id (see list_config_sets)" },
+          title: { type: "string", description: "New name (1-100 characters)" },
+        },
+        required: ["id", "title"],
+      },
+    },
+    {
+      name: "delete_config_set",
+      description: "Delete a config set. The last set cannot be deleted; deleting the active set switches to the one above it. Needs confirm: true.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "number", description: "Config set id (see list_config_sets)" },
+          confirm: { type: "boolean", description: "Must be true to delete" },
+        },
+        required: ["id", "confirm"],
+      },
+    },
+    {
+      name: "list_spectres",
+      truncatable: true,
+      description: "Show the build's spectre list (what Raise Spectre can raise; PoB's 'Manage Spectres...'), and optionally search PoB's spectre library by name or skill.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          search: { type: "string", description: "Search the spectre library (PoB's search box; empty lists every spectre)" },
+          search_mode: { type: "string", enum: ["names", "skills", "both"], description: "Match monster names, their skills, or both (default names)" },
+          limit: { type: "number", description: "Library results to show (default 50)" },
+        },
+      },
+    },
+    {
+      name: "set_spectres",
+      description: "Add spectres to or remove them from the build's spectre list, as PoB's Spectre Library popup. Spectres are given by name or by id (from list_spectres). Then choose the raised spectre with set_minion.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          add: { type: "array", items: { type: "string" }, description: "Spectres to add (names or ids)" },
+          remove: { type: "array", items: { type: "string" }, description: "Spectres to remove (names or ids)" },
+        },
+      },
+    },
+    {
+      name: "get_minion_options",
+      description: "Show the main skill's minion choices: the Minion and Minion Skill dropdowns of PoB's sidebar (or of the Calcs tab with calcs: true).",
+      inputSchema: {
+        type: "object",
+        properties: { calcs: { type: "boolean", description: "Read the Calcs tab's own selection instead of the sidebar's (default false)" } },
+      },
+    },
+    {
+      name: "set_minion",
+      description: "Choose the main skill's minion (e.g. which spectre Raise Spectre raises), the item set of a minion that uses one, and the minion skill whose damage PoB shows. Stats are recalculated.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          minion: { type: "string", description: "Minion name or id (see get_minion_options)" },
+          item_set_id: { type: "number", description: "Item set for a minion that takes one (e.g. Animate Guardian)" },
+          minion_skill: { description: "Minion skill index (1-based) or name" },
+          calcs: { type: "boolean", description: "Set the Calcs tab's own selection instead of the sidebar's (default false)" },
+        },
+      },
+    },
+    {
+      name: "get_custom_mods",
+      truncatable: true,
+      description: "Show the active config set's custom modifiers (Configuration tab, Custom Modifiers): each group, whether it is enabled, and whether PoB parses each line. With search, also lists matching modifiers from PoB's 'Add Mod' browser.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          search: { type: "string", description: "Search PoB's Add Mod browser (e.g. 'burning damage')" },
+          limit: { type: "number", description: "Browser results to show (default 50)" },
+        },
+      },
+    },
+    {
+      name: "set_custom_mods",
+      description: "Change the active config set's custom modifiers, which PoB adds to the calculation: add a group (Add Mod Group), set a group's title, its whole text (one modifier per line), append one modifier (Add Mod), enable or disable it, or remove it (needs confirm: true). Lines PoB cannot parse have no effect and are reported. Stats are recalculated.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          group_index: { type: "number", description: "Group to change (1-based, see get_custom_mods). Optional when there is one group or with add_group." },
+          add_group: { type: "boolean", description: "Add a new group first; the other fields then apply to it" },
+          remove_group: { type: "boolean", description: "Remove group_index (needs confirm: true)" },
+          title: { type: "string", description: "New group title" },
+          text: { type: "string", description: "Replace the group's text: modifiers, one per line, e.g. '20% more Damage'" },
+          append_mod: { type: "string", description: "Append one modifier line to the group" },
+          enabled: { type: "boolean", description: "Enable or disable the group" },
+          confirm: { type: "boolean", description: "Must be true with remove_group" },
+        },
+      },
+    },
   ];
 }
 
@@ -1319,7 +1518,7 @@ export function getOptimizationToolSchemas(): ToolSchema[] {
     {
       name: "optimize_skill_links",
       truncatable: true,
-      description: "Analyze skill gem setups for 'more' multipliers, penetration, and support gem synergies. Flags missing multiplicative damage supports and suggests clear-speed vs bossing balance.",
+      description: "Analyze skill gem setups for 'more' multipliers, penetration, and support gem synergies. Flags missing multiplicative damage supports and suggests clear-speed vs bossing balance. These are template estimates, not Path of Building's calculation; rank_gems_by_dps gives PoB's own DPS for every candidate gem.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1368,7 +1567,7 @@ export function getConfigToolSchemas(): ToolSchema[] {
     },
     {
       name: "set_config",
-      description: "Modify configuration inputs. Common keys — Charges: usePowerCharges, useFrenzyCharges, useEnduranceCharges | Conditions: buffFortification, conditionLeeching, conditionFullLife, conditionFullEnergyShield | Buffs: buffOnslaught | Enemy: enemyIsBoss ('None'/'Boss'/'Pinnacle'/'Uber'; legacy names 'Shaper'/'Sirus' map to 'Pinnacle', 'Atziri'/'Uber Atziri' to 'Boss'), enemyLevel | Build: bandit ('None'/'Oak'/'Alira'/'Kraityn'), pantheonMajorGod, pantheonMinorGod. Values outside an option's accepted set are rejected per key, never silently ignored. Call get_config to see all current values.",
+      description: "Modify configuration inputs. Common keys — Charges: usePowerCharges, useFrenzyCharges, useEnduranceCharges | Conditions: buffFortification, conditionLeeching, conditionFullLife, conditionFullEnergyShield | Buffs: buffOnslaught | Enemy: enemyIsBoss ('None'/'Boss'/'Pinnacle'/'Uber'; legacy names 'Shaper'/'Sirus' map to 'Pinnacle', 'Atziri'/'Uber Atziri' to 'Boss'), enemyLevel | Build: bandit ('None'/'Oak'/'Alira'/'Kraityn'), pantheonMajorGod, pantheonMinorGod | Custom modifiers: customMods (text of the first custom modifier group, one modifier per line; set_custom_mods handles every group). Values outside an option's accepted set are rejected per key, never silently ignored. Call get_config to see all current values.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1422,7 +1621,7 @@ export function getConfigToolSchemas(): ToolSchema[] {
     },
     {
       name: "save_config_preset",
-      description: "Save the current configuration (charges, conditions, enemy settings) as a named preset for quick reuse",
+      description: "Save the current configuration (charges, conditions, enemy settings) as a named preset for quick reuse. Presets are separate files under the builds folder, shared across builds; for config sets stored inside the build (PoB's Config set dropdown), use create_config_set.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1436,7 +1635,7 @@ export function getConfigToolSchemas(): ToolSchema[] {
     },
     {
       name: "load_config_preset",
-      description: "Load a previously saved configuration preset, restoring all charge, condition, and enemy settings at once",
+      description: "Load a previously saved configuration preset, restoring all charge, condition, and enemy settings at once. Presets are separate files (save_config_preset), not the build's own config sets (select_config_set).",
       inputSchema: {
         type: "object",
         properties: {
@@ -1450,7 +1649,7 @@ export function getConfigToolSchemas(): ToolSchema[] {
     },
     {
       name: "list_config_presets",
-      description: "List all saved configuration presets",
+      description: "List all saved configuration presets (separate preset files, not the config sets stored inside the build; see list_config_sets).",
       inputSchema: {
         type: "object",
         properties: {},
@@ -1508,7 +1707,7 @@ export function getSkillGemToolSchemas(): ToolSchema[] {
     {
       name: "suggest_support_gems",
       truncatable: true,
-      description: "Get intelligent support gem recommendations based on build archetype. Provides ranked suggestions with DPS estimates, cost, and reasoning.",
+      description: "Get intelligent support gem recommendations based on build archetype. Provides ranked suggestions with DPS estimates, cost, and reasoning. The DPS figures are template estimates, not Path of Building's calculation; rank_gems_by_dps gives PoB's own DPS for every candidate.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1539,7 +1738,7 @@ export function getSkillGemToolSchemas(): ToolSchema[] {
     {
       name: "compare_gem_setups",
       truncatable: true,
-      description: "Compare multiple gem configurations side-by-side to evaluate different options. NOTE: Full DPS comparison requires Lua bridge integration (future enhancement).",
+      description: "Compare multiple gem configurations side-by-side to evaluate different options. NOTE: Full DPS comparison requires Lua bridge integration (future enhancement). For PoB's own DPS of each gem in a slot, use rank_gems_by_dps.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1591,7 +1790,7 @@ export function getSkillGemToolSchemas(): ToolSchema[] {
     {
       name: "find_optimal_links",
       truncatable: true,
-      description: "Auto-generate the best support gem combination for a skill based on budget and optimization goal. Provides step-by-step upgrade path.",
+      description: "Auto-generate the best support gem combination for a skill based on budget and optimization goal. Provides step-by-step upgrade path. These are template estimates, not Path of Building's calculation; rank_gems_by_dps gives PoB's own DPS for every candidate gem.",
       inputSchema: {
         type: "object",
         properties: {

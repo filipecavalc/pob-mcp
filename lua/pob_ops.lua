@@ -653,6 +653,15 @@ function M.set_config(params)
       else
         rejected[key] = 'expected number'
       end
+    elseif key == 'customMods' then
+      -- PoB's old single "customMods" box: ConfigTab:Load moves it into the
+      -- first custom modifier group, so it sets that group's text here.
+      if type(value) ~= 'string' then
+        rejected[key] = 'expected the modifier text'
+      else
+        local res, err = M.set_custom_mods({ groupIndex = 1, text = value })
+        if res then applied[key] = res.groups[1] and res.groups[1].text or value else rejected[key] = err end
+      end
     elseif index[key] then
       local coerced, err = coerceConfigValue(index[key], value)
       if err then
@@ -3049,6 +3058,851 @@ function M.compare_copy(params)
   M.get_main_output()
   local out = build.calcsTab.mainOutput or {}
   result.stats = { Life = out.Life, EnergyShield = out.EnergyShield, TotalEHP = out.TotalEHP, CombinedDPS = out.CombinedDPS, FullDPS = out.FullDPS }
+  return result
+end
+
+-- ===========================================================================
+-- Skills tab, config tab and minions: gems ranked by PoB's DPS sort, skill
+-- sets, config sets, the spectre library, the main skill's minion, and the
+-- config tab's custom modifiers. Each function names the PoB code it mirrors.
+-- ===========================================================================
+
+-- SkillsTab.lua sortGemTypeList, defaultGemLevelList and showSupportGemTypeList.
+local GEM_SORT_FIELDS = { FullDPS = true, CombinedDPS = true, TotalDPS = true, AverageDamage = true,
+  TotalDot = true, BleedDPS = true, IgniteDPS = true, TotalPoisonDPS = true, TotalEHP = true }
+local GEM_LEVEL_MODES = { normalMaximum = true, corruptedMaximum = true, awakenedMaximum = true,
+  characterLevel = true, levelOne = true }
+local SUPPORT_GEM_TYPES = { ALL = true, NORMAL = true, EXCEPTIONAL = true }
+-- GemSelectControl:OnKeyDown: the "S" and "A" overlay buttons set sortGemsBy to these tags.
+local GEM_TYPE_TAGS = { support = 'support', active = 'grants_active_skill', all = false }
+-- The edit boxes of SkillSetListControl/ConfigSetListControl:RenameSet take at most 100 characters.
+local SET_TITLE_MAX = 100
+
+-- Ranks the gems PoB's gem dropdown offers for one gem slot of a socket group,
+-- by the DPS PoB computes with each gem in that slot. This drives PoB's own
+-- GemSelectControl the way the open dropdown does with "Sort gems by DPS" on:
+-- UpdateSortCache (candidates, which supports can support the group's skills,
+-- the misc calculator and base DPS), BuildList (filter and order), then the
+-- DPSBuilder coroutine (CalcOutputWithThisGem per candidate), run to the end.
+-- The DPS is PoB's for the field chosen (SkillsTab sortGemsByDPSField): for
+-- every field but FullDPS that is the main skill's output, as in PoB, so a
+-- support in another group only moves it when it reaches the main skill.
+-- params: { groupIndex?, gemIndex?, dpsField?, gemType?: 'support'|'active'|'all',
+--           search?, defaultGemLevel?, defaultGemQuality?, showSupportGemTypes?,
+--           showLegacyGems?, includeUnevaluated?, limit? }
+function M.rank_gems_by_dps(params)
+  if not build or not build.skillsTab or not build.calcsTab then return nil, 'skills not initialized' end
+  params = type(params) == 'table' and params or {}
+  local skillsTab = build.skillsTab
+  local groupList = skillsTab.socketGroupList or {}
+  local groupIndex = tonumber(params.groupIndex) or build.mainSocketGroup or 1
+  local group = groupList[groupIndex]
+  if not group then
+    return nil, string.format('socket group %s not found (valid range: 1-%d)', tostring(params.groupIndex or groupIndex), #groupList)
+  end
+  -- SkillsTab hides the gem slots of groups granted by items or passives.
+  if group.source then return nil, 'socket group ' .. groupIndex .. ' is granted by an item or passive; PoB does not let you edit its gems' end
+  local gemCount = #(group.gemList or {})
+  local slotIndex = tonumber(params.gemIndex) or (gemCount + 1)
+  if slotIndex < 1 or slotIndex > gemCount + 1 or slotIndex % 1 ~= 0 then
+    return nil, string.format('gem index must be 1-%d (%d = a new gem slot)', gemCount + 1, gemCount + 1)
+  end
+  local dpsField = params.dpsField or skillsTab.sortGemsByDPSField or 'CombinedDPS'
+  if not GEM_SORT_FIELDS[dpsField] then return nil, 'unknown DPS sort field: ' .. tostring(dpsField) end
+  local gemType = params.gemType or 'support'
+  if GEM_TYPE_TAGS[gemType] == nil then return nil, "gem type must be 'support', 'active' or 'all'" end
+  if params.defaultGemLevel ~= nil and not GEM_LEVEL_MODES[params.defaultGemLevel] then
+    return nil, 'unknown default gem level: ' .. tostring(params.defaultGemLevel)
+  end
+  if params.showSupportGemTypes ~= nil and not SUPPORT_GEM_TYPES[params.showSupportGemTypes] then
+    return nil, 'support gem types must be ALL, NORMAL or EXCEPTIONAL'
+  end
+  local quality = params.defaultGemQuality ~= nil and tonumber(params.defaultGemQuality) or nil
+  if params.defaultGemQuality ~= nil and (not quality or quality < 0 or quality > 23) then
+    return nil, 'default gem quality must be 0-23'
+  end
+  local search = params.search ~= nil and tostring(params.search) or ''
+  local limit = math.min(math.max(tonumber(params.limit) or 25, 1), 500)
+
+  -- Fresh output, so the misc calculator UpdateSortCache takes describes the build as it is.
+  M.get_main_output()
+  local saved = {
+    displayGroup = skillsTab.displayGroup, sortGemsByDPS = skillsTab.sortGemsByDPS,
+    sortGemsByDPSField = skillsTab.sortGemsByDPSField, showSupportGemTypes = skillsTab.showSupportGemTypes,
+    showLegacyGems = skillsTab.showLegacyGems, defaultGemLevel = skillsTab.defaultGemLevel,
+    defaultGemQuality = skillsTab.defaultGemQuality,
+  }
+  -- CalcOutputWithThisGem puts each candidate into the slot's gem table and
+  -- restores only gemData, level and displayEffect. The calculation also writes
+  -- per-skill choices onto the instances it runs (skillPart, skillMinion, ...),
+  -- so an active candidate leaves such fields on the gem it replaced. Keep the
+  -- group, its gem list and every gem's fields, and put them back afterwards.
+  local function fieldsOf(t) local copy = {} for k, v in pairs(t) do copy[k] = v end return copy end
+  local function restoreFields(t, copy)
+    for k in pairs(t) do if copy[k] == nil then t[k] = nil end end
+    for k, v in pairs(copy) do t[k] = v end
+  end
+  local groupFields, gemTables, gemFields = fieldsOf(group), {}, {}
+  for i, gem in ipairs(group.gemList) do gemTables[i], gemFields[i] = gem, fieldsOf(gem) end
+  local ok, result = pcall(function()
+    -- GemSelectControl reads the group from skillsTab.displayGroup (SetDisplayGroup
+    -- sets it; the rest of SetDisplayGroup only refills the tab's edit boxes).
+    skillsTab.displayGroup = group
+    skillsTab.sortGemsByDPS = true
+    skillsTab.sortGemsByDPSField = dpsField
+    if params.showSupportGemTypes ~= nil then skillsTab.showSupportGemTypes = params.showSupportGemTypes end
+    if params.showLegacyGems ~= nil then skillsTab.showLegacyGems = params.showLegacyGems == true end
+    if params.defaultGemLevel ~= nil then skillsTab.defaultGemLevel = params.defaultGemLevel end
+    if quality then skillsTab.defaultGemQuality = quality end
+
+    local control = Compat.construct('GemSelectControl', nil, { 0, 0, 300, 20 }, skillsTab, slotIndex, function() end)
+    control.sortGemsBy = GEM_TYPE_TAGS[gemType] or nil
+    control:UpdateSortCache()
+    control:BuildList(search)
+    local sortCache = control.sortCache
+    -- The open dropdown calculates every pending gem; with a search, only the
+    -- gems the search lists are worth the time.
+    if search ~= '' and sortCache.pendingGems then
+      local listed = {}
+      for _, gemId in ipairs(control.list) do listed[gemId] = true end
+      local pending = {}
+      for _, gemId in ipairs(sortCache.pendingGems) do
+        if listed[gemId] then pending[#pending + 1] = gemId end
+      end
+      sortCache.pendingGems = pending
+    end
+    local evaluated, evaluatedCount = {}, 0
+    for _, gemId in ipairs(sortCache.pendingGems or {}) do
+      evaluated[gemId] = true
+      evaluatedCount = evaluatedCount + 1
+    end
+    local builder = coroutine.create(control.DPSBuilder)
+    repeat
+      local resumed, err = coroutine.resume(builder, control)
+      if not resumed then error(err, 0) end
+    until coroutine.status(builder) == 'dead'
+    -- Rebuild the list now every DPS is known, as the dropdown re-sorts on each draw.
+    control:BuildList(search)
+
+    local baseDPS = sortCache.baseDPS or 0
+    local candidates, listedCount = {}, 0
+    for position, gemId in ipairs(control.list) do
+      local gemData = control.gems[gemId]
+      if gemData then
+        listedCount = listedCount + 1
+        if (evaluated[gemId] or params.includeUnevaluated == true) and #candidates < limit then
+          local dps = tonumber(sortCache.dps[gemId]) or baseDPS
+          table.insert(candidates, {
+            position = position,
+            name = gemData.name,
+            gemId = gemData.id,
+            support = gemData.grantedEffect and gemData.grantedEffect.support == true or false,
+            canSupport = sortCache.canSupport[gemId] == true,
+            evaluated = evaluated[gemId] == true,
+            level = skillsTab:ProcessGemLevel(gemData),
+            dps = dps,
+            delta = dps - baseDPS,
+            percent = baseDPS ~= 0 and (dps - baseDPS) / baseDPS * 100 or nil,
+          })
+        end
+      end
+    end
+    local replaced = group.gemList[slotIndex]
+    local activeSkills = {}
+    for _, activeSkill in ipairs(group.displaySkillList or {}) do
+      local effect = activeSkill.activeEffect
+      if effect and effect.grantedEffect then table.insert(activeSkills, effect.grantedEffect.name) end
+    end
+    return {
+      groupIndex = groupIndex,
+      groupLabel = group.displayLabel or group.label,
+      activeSkills = activeSkills,
+      mainSocketGroup = build.mainSocketGroup,
+      gemIndex = slotIndex,
+      replaces = replaced and (replaced.nameSpec or replaced.name) or nil,
+      dpsField = dpsField,
+      gemType = gemType,
+      search = search,
+      defaultGemLevel = skillsTab.defaultGemLevel,
+      defaultGemQuality = skillsTab.defaultGemQuality or 0,
+      baseDPS = baseDPS,
+      evaluatedCount = evaluatedCount,
+      listedCount = listedCount,
+      candidates = candidates,
+    }
+  end)
+  for key, value in pairs(saved) do skillsTab[key] = value end
+  restoreFields(group, groupFields)
+  for i = #group.gemList, 1, -1 do group.gemList[i] = nil end
+  for i, gem in ipairs(gemTables) do
+    restoreFields(gem, gemFields[i])
+    group.gemList[i] = gem
+  end
+  if not ok then return nil, 'gem ranking failed: ' .. tostring(result) end
+  return result
+end
+
+-- ---------------------------------------------------------------------------
+-- Skill sets (SkillSetListControl, SkillsTab:NewSkillSet / SetActiveSkillSet)
+-- ---------------------------------------------------------------------------
+
+local function checkSetTitle(title)
+  if type(title) ~= 'string' or not title:match('%S') then return nil, 'title must contain a non-space character' end
+  if #title > SET_TITLE_MAX then return nil, 'title too long (max ' .. SET_TITLE_MAX .. ' characters)' end
+  return title
+end
+
+local function orderIndexOf(list, id)
+  for index, value in ipairs(list) do if value == id then return index end end
+  return nil
+end
+
+function M.list_skill_sets()
+  if not build or not build.skillsTab then return nil, 'skills not initialized' end
+  local tab, sets = build.skillsTab, {}
+  for index, id in ipairs(tab.skillSetOrderList or {}) do
+    local set = tab.skillSets[id]
+    if set then
+      table.insert(sets, {
+        index = index, id = id,
+        -- SkillSetListControl:GetRowValue shows an untitled set as "Default".
+        title = set.title or 'Default',
+        active = id == tab.activeSkillSetId,
+        socketGroups = #(set.socketGroupList or {}),
+      })
+    end
+  end
+  return { skillSets = sets, activeSkillSetId = tab.activeSkillSetId }
+end
+
+local function skillSetById(id)
+  local tab = build.skillsTab
+  id = tonumber(id)
+  if not id or not tab.skillSets[id] or not orderIndexOf(tab.skillSetOrderList, id) then return nil end
+  return tab.skillSets[id], id
+end
+
+-- SkillSetListControl:OnSelClick (double click): SetActiveSkillSet, AddUndoState.
+function M.select_skill_set(params)
+  if not build or not build.skillsTab then return nil, 'skills not initialized' end
+  local set, id = skillSetById(type(params) == 'table' and params.id)
+  if not set then return nil, 'skill set id ' .. tostring(params and params.id) .. ' not found (see list_skill_sets)' end
+  -- OnSelClick does nothing for the set already active.
+  if id == build.skillsTab.activeSkillSetId then
+    local list = M.list_skill_sets()
+    list.unchanged = true
+    return list
+  end
+  build.skillsTab:SetActiveSkillSet(id)
+  build.skillsTab:AddUndoState()
+  M.get_main_output()
+  return M.list_skill_sets()
+end
+
+-- SkillSetListControl "New" (SkillsTab:NewSkillSet) and "Copy" (copyTable of the
+-- set, each socket group and gem), then RenameSet's Save: title, modFlag, add
+-- to the order list, AddUndoState, SyncLoadouts. PoB does not switch to it.
+-- params: { title, copyFrom?: id, activate?: boolean }
+function M.create_skill_set(params)
+  if not build or not build.skillsTab then return nil, 'skills not initialized' end
+  params = type(params) == 'table' and params or {}
+  local title, err = checkSetTitle(params.title)
+  if not title then return nil, err end
+  local tab = build.skillsTab
+  local newSet
+  if params.copyFrom ~= nil then
+    local source = skillSetById(params.copyFrom)
+    if not source then return nil, 'skill set id to copy ' .. tostring(params.copyFrom) .. ' not found' end
+    newSet = copyTable(source, true)
+    newSet.socketGroupList = {}
+    for _, socketGroup in pairs(source.socketGroupList) do
+      local newGroup = copyTable(socketGroup, true)
+      newGroup.gemList = {}
+      for gemIndex, gem in pairs(socketGroup.gemList) do newGroup.gemList[gemIndex] = copyTable(gem, true) end
+      table.insert(newSet.socketGroupList, newGroup)
+    end
+    newSet.id = 1
+    while tab.skillSets[newSet.id] do newSet.id = newSet.id + 1 end
+    tab.skillSets[newSet.id] = newSet
+  else
+    newSet = tab:NewSkillSet()
+  end
+  newSet.title = title
+  tab.modFlag = true
+  table.insert(tab.skillSetOrderList, newSet.id)
+  tab:AddUndoState()
+  build:SyncLoadouts()
+  if params.activate == true then
+    tab:SetActiveSkillSet(newSet.id)
+    tab:AddUndoState()
+    M.get_main_output()
+  end
+  local list = M.list_skill_sets()
+  list.created = newSet.id
+  return list
+end
+
+-- SkillSetListControl:RenameSet's Save.
+function M.rename_skill_set(params)
+  if not build or not build.skillsTab then return nil, 'skills not initialized' end
+  params = type(params) == 'table' and params or {}
+  local set = skillSetById(params.id)
+  if not set then return nil, 'skill set id ' .. tostring(params.id) .. ' not found (see list_skill_sets)' end
+  local title, err = checkSetTitle(params.title)
+  if not title then return nil, err end
+  set.title = title
+  build.skillsTab.modFlag = true
+  build.skillsTab:AddUndoState()
+  build:SyncLoadouts()
+  return M.list_skill_sets()
+end
+
+-- SkillSetListControl:OnSelDelete's confirm: remove from the order list and
+-- the sets; a deleted active set hands over to the set above it.
+function M.delete_skill_set(params)
+  if not build or not build.skillsTab then return nil, 'skills not initialized' end
+  params = type(params) == 'table' and params or {}
+  local tab = build.skillsTab
+  local set, id = skillSetById(params.id)
+  if not set then return nil, 'skill set id ' .. tostring(params.id) .. ' not found (see list_skill_sets)' end
+  if #tab.skillSetOrderList <= 1 then return nil, 'cannot delete the only skill set' end
+  local index = orderIndexOf(tab.skillSetOrderList, id)
+  table.remove(tab.skillSetOrderList, index)
+  tab.skillSets[id] = nil
+  if id == tab.activeSkillSetId then
+    tab:SetActiveSkillSet(tab.skillSetOrderList[math.max(1, index - 1)])
+  end
+  tab:AddUndoState()
+  build:SyncLoadouts()
+  M.get_main_output()
+  local list = M.list_skill_sets()
+  list.deleted = { id = id, title = set.title or 'Default' }
+  return list
+end
+
+-- ---------------------------------------------------------------------------
+-- Config sets (ConfigSetListControl, ConfigTab:NewConfigSet / SetActiveConfigSet)
+-- ---------------------------------------------------------------------------
+
+function M.list_config_sets()
+  if not build or not build.configTab then return nil, 'config not initialized' end
+  local tab, sets = build.configTab, {}
+  for index, id in ipairs(tab.configSetOrderList or {}) do
+    local set = tab.configSets[id]
+    if set then
+      table.insert(sets, {
+        index = index, id = id,
+        title = set.title or 'Default',
+        active = id == tab.activeConfigSetId,
+        customModGroups = #(set.customModsList or {}),
+      })
+    end
+  end
+  return { configSets = sets, activeConfigSetId = tab.activeConfigSetId }
+end
+
+local function configSetById(id)
+  local tab = build.configTab
+  id = tonumber(id)
+  if not id or not tab.configSets[id] or not orderIndexOf(tab.configSetOrderList, id) then return nil end
+  return tab.configSets[id], id
+end
+
+-- ConfigSetListControl:OnSelClick (double click).
+function M.select_config_set(params)
+  if not build or not build.configTab then return nil, 'config not initialized' end
+  local set, id = configSetById(type(params) == 'table' and params.id)
+  if not set then return nil, 'config set id ' .. tostring(params and params.id) .. ' not found (see list_config_sets)' end
+  -- OnSelClick does nothing for the set already active.
+  if id == build.configTab.activeConfigSetId then
+    local list = M.list_config_sets()
+    list.unchanged = true
+    return list
+  end
+  build.configTab:SetActiveConfigSet(id)
+  build.configTab:AddUndoState()
+  M.get_main_output()
+  return M.list_config_sets()
+end
+
+-- ConfigSetListControl "New" (ConfigTab:NewConfigSet) and "Copy" (copyTable of
+-- the set), then RenameSet's Save. PoB does not switch to it.
+-- params: { title, copyFrom?: id, activate?: boolean }
+function M.create_config_set(params)
+  if not build or not build.configTab then return nil, 'config not initialized' end
+  params = type(params) == 'table' and params or {}
+  local title, err = checkSetTitle(params.title)
+  if not title then return nil, err end
+  local tab = build.configTab
+  local newSet
+  if params.copyFrom ~= nil then
+    local source = configSetById(params.copyFrom)
+    if not source then return nil, 'config set id to copy ' .. tostring(params.copyFrom) .. ' not found' end
+    newSet = copyTable(source)
+    newSet.id = 1
+    while tab.configSets[newSet.id] do newSet.id = newSet.id + 1 end
+    tab.configSets[newSet.id] = newSet
+  else
+    newSet = tab:NewConfigSet()
+  end
+  newSet.title = title
+  tab.modFlag = true
+  table.insert(tab.configSetOrderList, newSet.id)
+  tab:AddUndoState()
+  build:SyncLoadouts()
+  if params.activate == true then
+    tab:SetActiveConfigSet(newSet.id)
+    tab:AddUndoState()
+    M.get_main_output()
+  end
+  local list = M.list_config_sets()
+  list.created = newSet.id
+  return list
+end
+
+-- ConfigSetListControl:RenameSet's Save.
+function M.rename_config_set(params)
+  if not build or not build.configTab then return nil, 'config not initialized' end
+  params = type(params) == 'table' and params or {}
+  local set = configSetById(params.id)
+  if not set then return nil, 'config set id ' .. tostring(params.id) .. ' not found (see list_config_sets)' end
+  local title, err = checkSetTitle(params.title)
+  if not title then return nil, err end
+  set.title = title
+  build.configTab.modFlag = true
+  build.configTab:AddUndoState()
+  build:SyncLoadouts()
+  return M.list_config_sets()
+end
+
+-- ConfigSetListControl:OnSelDelete's confirm.
+function M.delete_config_set(params)
+  if not build or not build.configTab then return nil, 'config not initialized' end
+  params = type(params) == 'table' and params or {}
+  local tab = build.configTab
+  local set, id = configSetById(params.id)
+  if not set then return nil, 'config set id ' .. tostring(params.id) .. ' not found (see list_config_sets)' end
+  if #tab.configSetOrderList <= 1 then return nil, 'cannot delete the only config set' end
+  local index = orderIndexOf(tab.configSetOrderList, id)
+  table.remove(tab.configSetOrderList, index)
+  tab.configSets[id] = nil
+  if id == tab.activeConfigSetId then
+    tab:SetActiveConfigSet(tab.configSetOrderList[math.max(1, index - 1)])
+  end
+  tab:AddUndoState()
+  build:SyncLoadouts()
+  M.get_main_output()
+  local list = M.list_config_sets()
+  list.deleted = { id = id, title = set.title or 'Default' }
+  return list
+end
+
+-- ---------------------------------------------------------------------------
+-- Spectre library (buildMode:OpenSpectreLibrary, MinionListControl,
+-- MinionSearchListControl) and the main skill's minion (Build.lua and
+-- CalcsTab's "Minion" / "Minion Skill" dropdowns)
+-- ---------------------------------------------------------------------------
+
+local SPECTRE_SEARCH_MODES = { names = 1, skills = 2, both = 3 }
+
+local function describeMinion(id)
+  local minion = build.data.minions[id]
+  local skills = {}
+  for _, skillId in ipairs(minion and minion.skillList or {}) do
+    if build.data.skills[skillId] then table.insert(skills, build.data.skills[skillId].name) end
+  end
+  return { id = id, name = minion and minion.name or id, skills = skills }
+end
+
+-- OpenSpectreLibrary's source list: every spectre, by name then id.
+local function spectreSourceList()
+  local sourceList = {}
+  for id in pairs(build.data.spectres or {}) do table.insert(sourceList, id) end
+  table.sort(sourceList, function(a, b)
+    if build.data.minions[a].name == build.data.minions[b].name then return a < b end
+    return build.data.minions[a].name < build.data.minions[b].name
+  end)
+  return sourceList
+end
+
+-- params: { search?: string, searchMode?: 'names'|'skills'|'both', limit? }
+function M.list_spectres(params)
+  if not build or not build.data or not build.data.minions then return nil, 'build not initialized' end
+  params = type(params) == 'table' and params or {}
+  local inBuild = {}
+  for index, id in ipairs(build.spectreList or {}) do
+    local entry = describeMinion(id)
+    entry.index = index
+    table.insert(inBuild, entry)
+  end
+  local result = { spectres = inBuild }
+  if params.search ~= nil then
+    local mode = SPECTRE_SEARCH_MODES[params.searchMode or 'names']
+    if not mode then return nil, "search mode must be 'names', 'skills' or 'both'" end
+    local limit = math.min(math.max(tonumber(params.limit) or 50, 1), 1000)
+    -- The library popup's own controls do the filtering.
+    local dest = Compat.construct('MinionListControl', nil, { 0, 0, 265, 250 }, build.data, copyTable(build.spectreList or {}))
+    local source = Compat.construct('MinionSearchListControl', nil, { 0, 0, 265, 230 }, build.data, spectreSourceList(), dest)
+    source:ListFilterChanged(tostring(params.search), mode)
+    local found = {}
+    for _, id in ipairs(source.list) do
+      if #found >= limit then break end
+      local entry = describeMinion(id)
+      entry.inBuild = isValueInArray(build.spectreList or {}, id) and true or false
+      table.insert(found, entry)
+    end
+    result.library = { search = tostring(params.search), searchMode = params.searchMode or 'names', total = #source.list, results = found }
+  end
+  return result
+end
+
+-- A minion by id, or by its name when exactly one candidate carries it.
+local function resolveMinion(ref, candidates)
+  if type(ref) ~= 'string' or ref == '' then return nil, 'minion must be a non-empty id or name' end
+  for _, id in ipairs(candidates) do if id == ref then return id end end
+  local matches = {}
+  for _, id in ipairs(candidates) do
+    local minion = build.data.minions[id]
+    if minion and (minion.name or ''):lower() == ref:lower() then table.insert(matches, id) end
+  end
+  if #matches == 1 then return matches[1] end
+  if #matches > 1 then return nil, 'several minions are named "' .. ref .. '"; use an id: ' .. table.concat(matches, ', ') end
+  return nil, 'no minion "' .. ref .. '"'
+end
+
+-- The library popup: Add (MinionListControl:AddSel, no duplicates), Remove
+-- (OnSelDelete), then Save (spectreList = the edited copy, modFlag, buildFlag).
+-- params: { add?: string[], remove?: string[] }
+function M.set_spectres(params)
+  if not build or not build.data or not build.data.spectres then return nil, 'build not initialized' end
+  params = type(params) == 'table' and params or {}
+  local add = type(params.add) == 'table' and params.add or {}
+  local remove = type(params.remove) == 'table' and params.remove or {}
+  if #add == 0 and #remove == 0 then return nil, 'nothing to change: give add and/or remove' end
+  local destList = copyTable(build.spectreList or {})
+  local added, removed, unchanged = {}, {}, {}
+  for _, ref in ipairs(remove) do
+    local id, err = resolveMinion(ref, destList)
+    if not id then return nil, 'remove: ' .. err .. ' in the build' end
+    table.remove(destList, isValueInArray(destList, id))
+    table.insert(removed, id)
+  end
+  local sourceList = spectreSourceList()
+  for _, ref in ipairs(add) do
+    local id, err = resolveMinion(ref, sourceList)
+    if not id then return nil, 'add: ' .. err .. ' in the spectre library' end
+    if isValueInArray(destList, id) then
+      table.insert(unchanged, id)
+    else
+      table.insert(destList, id)
+      table.insert(added, id)
+    end
+  end
+  build.spectreList = destList
+  build.modFlag = true
+  build.buildFlag = true
+  M.get_main_output()
+  local result = M.list_spectres({})
+  result.added, result.removed, result.alreadyInBuild = added, removed, unchanged
+  return result
+end
+
+-- The main skill of the sidebar (suffix '') or of the Calcs tab ('Calcs').
+local function mainSkillFor(calcs)
+  local suffix = calcs and 'Calcs' or ''
+  local groupIndex = calcs and build.calcsTab.input.skill_number or build.mainSocketGroup
+  local group = build.skillsTab.socketGroupList[groupIndex]
+  if not group then return nil, 'no main socket group' end
+  local displaySkillList = group['displaySkillList' .. suffix] or {}
+  local activeSkill = displaySkillList[group['mainActiveSkill' .. suffix] or 1]
+  if not activeSkill or not activeSkill.activeEffect then return nil, 'the main socket group has no active skill' end
+  return { suffix = suffix, groupIndex = groupIndex, group = group, activeSkill = activeSkill, activeEffect = activeSkill.activeEffect }
+end
+
+local function hasMinionChoice(activeSkill, activeEffect)
+  return not activeSkill.skillFlags.disable
+    and (activeEffect.grantedEffect.minionList or (activeSkill.minionList and activeSkill.minionList[1])) and true or false
+end
+
+-- What buildMode:RefreshSkillSelectControls fills the Minion and Minion Skill
+-- dropdowns with. params: { calcs?: boolean }
+function M.get_minion_options(params)
+  if not build or not build.skillsTab or not build.calcsTab then return nil, 'skills not initialized' end
+  params = type(params) == 'table' and params or {}
+  M.get_main_output()
+  local ctx, err = mainSkillFor(params.calcs == true)
+  if not ctx then return nil, err end
+  local activeSkill, activeEffect, suffix = ctx.activeSkill, ctx.activeEffect, ctx.suffix
+  local src = activeEffect.srcInstance or {}
+  local result = {
+    calcs = params.calcs == true,
+    groupIndex = ctx.groupIndex,
+    skill = activeEffect.grantedEffect.name,
+    hasMinion = false,
+  }
+  if not hasMinionChoice(activeSkill, activeEffect) then return result end
+  result.hasMinion = true
+  local options = {}
+  if activeEffect.grantedEffect.minionHasItemSet then
+    result.selectsItemSet = true
+    for _, itemSetId in ipairs(build.itemsTab.itemSetOrderList) do
+      local itemSet = build.itemsTab.itemSets[itemSetId]
+      table.insert(options, { itemSetId = itemSetId, label = itemSet.title or 'Default Item Set' })
+    end
+    result.selectedItemSetId = src['skillMinionItemSet' .. suffix] or 1
+  else
+    result.usesSpectreLibrary = (activeEffect.grantedEffect.minionList and not activeEffect.grantedEffect.minionList[1]) and true or false
+    for _, minionId in ipairs(activeSkill.minionList or {}) do
+      local minion = build.data.minions[minionId]
+      table.insert(options, { minionId = minionId, label = minion and minion.name or minionId })
+    end
+    result.selectedMinion = src['skillMinion' .. suffix] or (options[1] and options[1].minionId)
+  end
+  result.options = options
+  if activeSkill.minion then
+    local skills = {}
+    for index, minionSkill in ipairs(activeSkill.minion.activeSkillList or {}) do
+      table.insert(skills, { index = index, name = minionSkill.activeEffect.grantedEffect.name })
+    end
+    result.minionSkills = skills
+    result.selectedMinionSkill = src['skillMinionSkill' .. suffix] or 1
+  else
+    -- RefreshSkillSelectControls shows "<No spectres in build>" here.
+    result.noSpectres = true
+  end
+  return result
+end
+
+-- The Minion dropdown (srcInstance.skillMinion / skillMinionItemSet, with the
+-- Calcs suffix in the Calcs tab) and the Minion Skill dropdown (skillMinionSkill).
+-- params: { calcs?, minion?: id or name, itemSetId?, minionSkill?: index or name }
+function M.set_minion(params)
+  if not build or not build.skillsTab or not build.calcsTab then return nil, 'skills not initialized' end
+  params = type(params) == 'table' and params or {}
+  if params.minion == nil and params.itemSetId == nil and params.minionSkill == nil then
+    return nil, 'nothing to change: give a minion, an item set id or a minion skill'
+  end
+  local calcs = params.calcs == true
+  M.get_main_output()
+  local ctx, err = mainSkillFor(calcs)
+  if not ctx then return nil, err end
+  local activeSkill, activeEffect, suffix = ctx.activeSkill, ctx.activeEffect, ctx.suffix
+  if not hasMinionChoice(activeSkill, activeEffect) then
+    return nil, 'the main skill (' .. tostring(activeEffect.grantedEffect.name) .. ') has no minion to choose'
+  end
+  local src = activeEffect.srcInstance
+  -- Check the minion (or item set) before writing anything.
+  local field, value
+  if params.minion ~= nil or params.itemSetId ~= nil then
+    if activeEffect.grantedEffect.minionHasItemSet then
+      if params.minion ~= nil then return nil, activeEffect.grantedEffect.name .. "'s minion is chosen by item set: give an item set id" end
+      local itemSetId = tonumber(params.itemSetId)
+      if not itemSetId or not build.itemsTab.itemSets[itemSetId] then return nil, 'item set id ' .. tostring(params.itemSetId) .. ' not found' end
+      field, value = 'skillMinionItemSet' .. suffix, itemSetId
+    else
+      if params.itemSetId ~= nil then return nil, activeEffect.grantedEffect.name .. ' does not take an item set: give a minion' end
+      local minionId, resolveErr = resolveMinion(tostring(params.minion), activeSkill.minionList or {})
+      if not minionId then
+        local ids = {}
+        for _, id in ipairs(activeSkill.minionList or {}) do table.insert(ids, id) end
+        return nil, (resolveErr or 'unknown minion') .. ' for this skill; options: ' .. (#ids > 0 and table.concat(ids, ', ') or 'none (add spectres with set_spectres)')
+      end
+      field, value = 'skillMinion' .. suffix, minionId
+    end
+  end
+  -- The minion's skills depend on the minion chosen, so a minion skill can only
+  -- be checked after the recalculation; a failed check puts everything back.
+  local saved = {
+    minion = src['skillMinion' .. suffix], itemSet = src['skillMinionItemSet' .. suffix],
+    skill = src['skillMinionSkill' .. suffix], modFlag = build.modFlag, buildFlag = build.buildFlag,
+  }
+  local function fail(message)
+    src['skillMinion' .. suffix], src['skillMinionItemSet' .. suffix] = saved.minion, saved.itemSet
+    src['skillMinionSkill' .. suffix] = saved.skill
+    M.get_main_output()
+    build.modFlag, build.buildFlag = saved.modFlag, saved.buildFlag
+    return nil, message
+  end
+  if field then
+    src[field] = value
+    M.get_main_output()
+  end
+  if params.minionSkill ~= nil then
+    ctx = mainSkillFor(calcs)
+    local minion = ctx and ctx.activeSkill.minion
+    if not minion then return fail('the main skill has no minion yet (no spectres in the build?)') end
+    local skills = minion.activeSkillList or {}
+    local index = tonumber(params.minionSkill)
+    if not index then
+      for i, minionSkill in ipairs(skills) do
+        if minionSkill.activeEffect.grantedEffect.name:lower() == tostring(params.minionSkill):lower() then index = i break end
+      end
+    end
+    if not index or not skills[index] then
+      local names = {}
+      for i, minionSkill in ipairs(skills) do table.insert(names, i .. '=' .. minionSkill.activeEffect.grantedEffect.name) end
+      return fail('minion skill ' .. tostring(params.minionSkill) .. ' not found; options: ' .. table.concat(names, ', '))
+    end
+    src['skillMinionSkill' .. suffix] = index
+    M.get_main_output()
+  end
+  build.modFlag = true
+  build.buildFlag = true
+  return M.get_minion_options({ calcs = calcs })
+end
+
+-- ---------------------------------------------------------------------------
+-- Config tab custom modifiers (ConfigTab's "Custom Modifiers" section: mod
+-- groups of CustomModBlockControl, "Add Mod Group", each group's "Add Mod")
+-- ---------------------------------------------------------------------------
+
+-- ConfigTab:BuildModList reads each line this way; a line counts only when
+-- modLib.parseMod parses all of it (the edit box shows the rest as unsupported).
+local function parseCustomModLine(line)
+  local stripped = StripEscapes(line):match('^%s*(.-)%s*$')
+  local mods, extra = modLib.parseMod(stripped)
+  return { text = stripped, supported = (mods and not extra) and true or false, unparsed = extra }
+end
+
+local function describeCustomMods(configSet)
+  local groups = {}
+  for index, block in ipairs(configSet.customModsList or {}) do
+    local lines = {}
+    for line in (block.text or ''):gmatch('([^\n]*)\n?') do
+      if line:match('%S') then table.insert(lines, parseCustomModLine(line)) end
+    end
+    table.insert(groups, {
+      index = index,
+      title = block.title or 'Default',
+      enabled = block.enabled ~= false,
+      text = block.text or '',
+      lines = lines,
+    })
+  end
+  return groups
+end
+
+-- The "Add Mod" browser: ConfigTab:OpenAddModPopup builds and filters its list
+-- in local functions, so open the popup on a scratch group, type the search
+-- into its search box and read its list, then close it.
+local function browseCustomMods(query, limit)
+  if not (main and type(main.popups) == 'table') or not build.configTab.OpenAddModPopup then
+    return nil, 'the mod browser is not available in this PoB version'
+  end
+  local before = #main.popups
+  local scratch = { title = 'Default', enabled = true, text = '' }
+  local opened, err = pcall(build.configTab.OpenAddModPopup, build.configTab, scratch)
+  local popup = main.popups[1]
+  if not opened or #main.popups ~= before + 1 or not popup or not popup.controls or not popup.controls.listControl then
+    if #main.popups == before + 1 then main:ClosePopup() end
+    return nil, 'mod browser did not open: ' .. tostring(err)
+  end
+  local ok, result = pcall(function()
+    popup.controls.search:SetText(query, true)
+    local results, total = {}, 0
+    for _, modText in ipairs(popup.controls.listControl.list or {}) do
+      if modText ~= 'No matching modifiers found' then
+        total = total + 1
+        if #results < limit then
+          table.insert(results, { text = modText, supported = parseCustomModLine(modText).supported })
+        end
+      end
+    end
+    return { query = query, total = total, results = results }
+  end)
+  if main.popups[1] == popup then main:ClosePopup() end
+  if not ok then return nil, 'mod browser failed: ' .. tostring(result) end
+  return result
+end
+
+-- params: { search?: string, limit? }
+function M.get_custom_mods(params)
+  if not build or not build.configTab then return nil, 'config not initialized' end
+  params = type(params) == 'table' and params or {}
+  local tab = build.configTab
+  local configSet = tab.configSets[tab.activeConfigSetId]
+  if not configSet then return nil, 'active config set not found' end
+  local result = {
+    configSetId = tab.activeConfigSetId,
+    configSetTitle = configSet.title or 'Default',
+    groups = describeCustomMods(configSet),
+  }
+  if params.search ~= nil then
+    local limit = math.min(math.max(tonumber(params.limit) or 50, 1), 1000)
+    local browse, err = browseCustomMods(tostring(params.search), limit)
+    if not browse then return nil, err end
+    result.browser = browse
+  end
+  return result
+end
+
+-- A group's edit box keeps printable characters, tabs and newlines ("^%C\t\n").
+local function cleanCustomModText(text)
+  return (tostring(text):gsub('\r\n', '\n'):gsub('[^%C\t\n]', ''))
+end
+
+-- One change to the active config set's custom modifier groups, as the
+-- section's controls make it: "Add Mod Group" (a group titled "Group N"), the
+-- group's delete button (the last group gives way to an empty "Default"), its
+-- title and text boxes, its enable box, and "Add Mod" (appends a line).
+-- Each ends as they do: AddUndoState, BuildModList, buildFlag.
+-- params: { groupIndex?, addGroup?, removeGroup?, title?, text?, appendMod?, enabled? }
+function M.set_custom_mods(params)
+  if not build or not build.configTab then return nil, 'config not initialized' end
+  params = type(params) == 'table' and params or {}
+  local tab = build.configTab
+  local configSet = tab.configSets[tab.activeConfigSetId]
+  if not configSet then return nil, 'active config set not found' end
+  if params.addGroup == true and params.removeGroup == true then return nil, 'adding and removing a group cannot be combined' end
+  local edits = params.title ~= nil or params.text ~= nil or params.appendMod ~= nil or params.enabled ~= nil
+  if not (params.addGroup == true or params.removeGroup == true or edits) then
+    return nil, 'nothing to change: add or remove a group, or give a title, text, a modifier to append, or enabled'
+  end
+  if params.removeGroup == true and edits then return nil, 'removing a group cannot be combined with edits' end
+  local appendLine
+  if params.appendMod ~= nil then
+    appendLine = cleanCustomModText(params.appendMod):gsub('\n', ' ')
+    if not appendLine:match('%S') then return nil, 'the modifier to append must be a non-empty line' end
+  end
+  -- ConfigTab:UpdateCustomModsControls never leaves a set without a group.
+  configSet.customModsList = configSet.customModsList or {}
+  local list = configSet.customModsList
+  if #list == 0 then table.insert(list, { title = 'Default', enabled = true, text = '' }) end
+  local index
+  if params.addGroup == true then
+    table.insert(list, { title = 'Group ' .. (#list + 1), enabled = true, text = '' })
+    index = #list
+  else
+    index = tonumber(params.groupIndex) or (#list == 1 and 1 or nil)
+    if not index or not list[index] then
+      return nil, string.format('custom modifier group %s not found (valid range: 1-%d)', tostring(params.groupIndex), #list)
+    end
+  end
+  local removed
+  if params.removeGroup == true then
+    removed = table.remove(list, index)
+    if #list == 0 then table.insert(list, { title = 'Default', enabled = true, text = '' }) end
+  else
+    local block = list[index]
+    if params.title ~= nil then block.title = tostring(params.title) end
+    if params.text ~= nil then block.text = cleanCustomModText(params.text) end
+    if appendLine then
+      if block.text and #block.text > 0 and not block.text:match('\n$') then block.text = block.text .. '\n' end
+      block.text = (block.text or '') .. appendLine
+    end
+    if params.enabled ~= nil then block.enabled = params.enabled == true end
+  end
+  if tab.UpdateCustomModsControls then tab:UpdateCustomModsControls() end
+  tab:AddUndoState()
+  tab:BuildModList()
+  build.buildFlag = true
+  M.get_main_output()
+  local result = M.get_custom_mods({})
+  if removed then
+    result.removed = { index = index, title = removed.title or 'Default', text = removed.text or '' }
+  else
+    result.groupIndex = index
+  end
   return result
 end
 

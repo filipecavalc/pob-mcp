@@ -1058,4 +1058,240 @@ async setTree(params: {
   async compareCopy(params: CompareCopyParams): Promise<CompareCopyResult> {
     return this.compareAction<CompareCopyResult>("compare_copy", params);
   }
+
+  // --------------------------------------------------------------------------
+  // Skills tab, config tab and minions: gems ranked by PoB's DPS sort, skill
+  // sets, config sets, spectres, the main skill's minion, custom modifiers.
+  // --------------------------------------------------------------------------
+
+  private async sendResult<T>(action: string, params?: object): Promise<T> {
+    const res = await this.send(params === undefined ? { action } : { action, params });
+    if (!res.ok) throw new Error(res.error || `${action} failed`);
+    return res.result as T;
+  }
+
+  async rankGemsByDps(params: RankGemsParams = {}): Promise<GemDpsRanking> {
+    return this.sendResult<GemDpsRanking>("rank_gems_by_dps", params);
+  }
+
+  async listSkillSets(): Promise<SkillSetList> {
+    return this.sendResult<SkillSetList>("list_skill_sets");
+  }
+
+  async selectSkillSet(id: number): Promise<SkillSetList> {
+    return this.sendResult<SkillSetList>("select_skill_set", { id });
+  }
+
+  async createSkillSet(params: { title: string; copyFrom?: number; activate?: boolean }): Promise<SkillSetList> {
+    return this.sendResult<SkillSetList>("create_skill_set", params);
+  }
+
+  async renameSkillSet(id: number, title: string): Promise<SkillSetList> {
+    return this.sendResult<SkillSetList>("rename_skill_set", { id, title });
+  }
+
+  async deleteSkillSet(id: number): Promise<SkillSetList> {
+    return this.sendResult<SkillSetList>("delete_skill_set", { id });
+  }
+
+  async listConfigSets(): Promise<ConfigSetList> {
+    return this.sendResult<ConfigSetList>("list_config_sets");
+  }
+
+  async selectConfigSet(id: number): Promise<ConfigSetList> {
+    return this.sendResult<ConfigSetList>("select_config_set", { id });
+  }
+
+  async createConfigSet(params: { title: string; copyFrom?: number; activate?: boolean }): Promise<ConfigSetList> {
+    return this.sendResult<ConfigSetList>("create_config_set", params);
+  }
+
+  async renameConfigSet(id: number, title: string): Promise<ConfigSetList> {
+    return this.sendResult<ConfigSetList>("rename_config_set", { id, title });
+  }
+
+  async deleteConfigSet(id: number): Promise<ConfigSetList> {
+    return this.sendResult<ConfigSetList>("delete_config_set", { id });
+  }
+
+  async listSpectres(params: { search?: string; searchMode?: SpectreSearchMode; limit?: number } = {}): Promise<SpectreList> {
+    return this.sendResult<SpectreList>("list_spectres", params);
+  }
+
+  async setSpectres(params: { add?: string[]; remove?: string[] }): Promise<SpectreList> {
+    return this.sendResult<SpectreList>("set_spectres", params);
+  }
+
+  async getMinionOptions(params: { calcs?: boolean } = {}): Promise<MinionOptions> {
+    return this.sendResult<MinionOptions>("get_minion_options", params);
+  }
+
+  async setMinion(params: { calcs?: boolean; minion?: string; itemSetId?: number; minionSkill?: number | string }): Promise<MinionOptions> {
+    return this.sendResult<MinionOptions>("set_minion", params);
+  }
+
+  async getCustomMods(params: { search?: string; limit?: number } = {}): Promise<CustomModsState> {
+    return this.sendResult<CustomModsState>("get_custom_mods", params);
+  }
+
+  async setCustomMods(params: SetCustomModsParams): Promise<CustomModsState> {
+    return this.sendResult<CustomModsState>("set_custom_mods", params);
+  }
+}
+
+// ============================================================================
+// Skills tab, config tab and minions. Each interface mirrors the table the
+// matching M.<action>() in lua/pob_ops.lua returns.
+// ============================================================================
+
+/** rank_gems_by_dps params: the gem slot and the Skills tab's gem options. */
+export interface RankGemsParams {
+  groupIndex?: number;
+  gemIndex?: number;
+  dpsField?: GemSortField;
+  gemType?: "support" | "active" | "all";
+  search?: string;
+  defaultGemLevel?: "normalMaximum" | "corruptedMaximum" | "awakenedMaximum" | "characterLevel" | "levelOne";
+  defaultGemQuality?: number;
+  showSupportGemTypes?: "ALL" | "NORMAL" | "EXCEPTIONAL";
+  showLegacyGems?: boolean;
+  includeUnevaluated?: boolean;
+  limit?: number;
+}
+
+/** SkillsTab's "Sort gems by DPS" field choices (sortGemTypeList). */
+export type GemSortField = "FullDPS" | "CombinedDPS" | "TotalDPS" | "AverageDamage" | "TotalDot" | "BleedDPS" |
+  "IgniteDPS" | "TotalPoisonDPS" | "TotalEHP";
+
+export interface GemDpsCandidate {
+  /** Place in PoB's dropdown order (supports that apply first, then by DPS). */
+  position: number;
+  name: string;
+  gemId: string;
+  support: boolean;
+  canSupport: boolean;
+  /** False for gems PoB does not calculate (they show the base DPS). */
+  evaluated: boolean;
+  level: number;
+  dps: number;
+  delta: number;
+  percent?: number;
+}
+
+export interface GemDpsRanking {
+  groupIndex: number;
+  groupLabel?: string;
+  activeSkills: string[];
+  mainSocketGroup: number;
+  gemIndex: number;
+  replaces?: string;
+  dpsField: GemSortField;
+  gemType: string;
+  search: string;
+  defaultGemLevel: string;
+  defaultGemQuality: number;
+  baseDPS: number;
+  evaluatedCount: number;
+  listedCount: number;
+  candidates: GemDpsCandidate[];
+}
+
+export interface SkillSetEntry {
+  index: number;
+  id: number;
+  title: string;
+  active: boolean;
+  socketGroups: number;
+}
+
+export interface SkillSetList {
+  skillSets: SkillSetEntry[];
+  activeSkillSetId: number;
+  /** select_* on the set already active: nothing was done. */
+  unchanged?: boolean;
+  created?: number;
+  deleted?: { id: number; title: string };
+}
+
+export interface ConfigSetEntry {
+  index: number;
+  id: number;
+  title: string;
+  active: boolean;
+  customModGroups: number;
+}
+
+export interface ConfigSetList {
+  configSets: ConfigSetEntry[];
+  activeConfigSetId: number;
+  /** select_* on the set already active: nothing was done. */
+  unchanged?: boolean;
+  created?: number;
+  deleted?: { id: number; title: string };
+}
+
+export type SpectreSearchMode = "names" | "skills" | "both";
+
+export interface SpectreEntry {
+  id: string;
+  name: string;
+  skills: string[];
+  index?: number;
+  inBuild?: boolean;
+}
+
+export interface SpectreList {
+  spectres: SpectreEntry[];
+  library?: { search: string; searchMode: SpectreSearchMode; total: number; results: SpectreEntry[] };
+  added?: string[];
+  removed?: string[];
+  alreadyInBuild?: string[];
+}
+
+export interface MinionOptions {
+  calcs: boolean;
+  groupIndex: number;
+  skill: string;
+  hasMinion: boolean;
+  selectsItemSet?: boolean;
+  usesSpectreLibrary?: boolean;
+  options?: Array<{ minionId?: string; itemSetId?: number; label: string }>;
+  selectedMinion?: string;
+  selectedItemSetId?: number;
+  minionSkills?: Array<{ index: number; name: string }>;
+  selectedMinionSkill?: number;
+  noSpectres?: boolean;
+}
+
+export interface CustomModLine {
+  text: string;
+  supported: boolean;
+  unparsed?: string;
+}
+
+export interface CustomModGroup {
+  index: number;
+  title: string;
+  enabled: boolean;
+  text: string;
+  lines: CustomModLine[];
+}
+
+export interface CustomModsState {
+  configSetId: number;
+  configSetTitle: string;
+  groups: CustomModGroup[];
+  browser?: { query: string; total: number; results: Array<{ text: string; supported: boolean }> };
+  groupIndex?: number;
+  removed?: { index: number; title: string; text: string };
+}
+
+export interface SetCustomModsParams {
+  groupIndex?: number;
+  addGroup?: boolean;
+  removeGroup?: boolean;
+  title?: string;
+  text?: string;
+  appendMod?: string;
+  enabled?: boolean;
 }

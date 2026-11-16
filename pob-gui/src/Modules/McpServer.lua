@@ -35,6 +35,10 @@ local MODIFIES_BUILD = {
   remove_skill = true, remove_gem = true, create_socket_group = true, add_gem = true, select_spec = true,
   create_spec = true, delete_spec = true, rename_spec = true, select_item_set = true,
   set_socket_group_enabled = true, import_character = true,
+  -- Skill and config sets, spectres, the main skill's minion, custom modifiers.
+  select_skill_set = true, create_skill_set = true, rename_skill_set = true, delete_skill_set = true,
+  select_config_set = true, create_config_set = true, rename_config_set = true, delete_config_set = true,
+  set_spectres = true, set_minion = true, set_custom_mods = true,
 }
 -- Compare tab: copying a tree, item or config from a compared build changes the
 -- open build. The other compare_* actions change only the Compare tab's list.

@@ -1,4 +1,4 @@
-import { toFiniteNumber, type ConfigValues, type PoBLuaApiClient } from "../pobLuaBridge.js";
+import { toFiniteNumber, type ConfigValues, type CustomModsState, type PoBLuaApiClient } from "../pobLuaBridge.js";
 import { noteIgnoredError } from '../utils/errorHandling.js';
 import fs from 'fs/promises';
 import path from 'path';
@@ -112,7 +112,12 @@ export async function handleGetConfig(context: ConfigHandlerContext) {
 
   const config = await luaClient.getConfig();
   const labels = await luaClient.getConfigLabels().catch(() => ({}));
-  const formatted = formatConfigOutput(config, labels);
+  let formatted = formatConfigOutput(config, labels);
+  // The active config set's custom modifiers live outside the config inputs.
+  const customMods = typeof luaClient.getCustomMods === 'function'
+    ? await luaClient.getCustomMods().catch((e) => { noteIgnoredError('custom modifiers unavailable — omit them from output', e); return undefined; })
+    : undefined;
+  if (customMods) formatted += formatCustomModsSummary(customMods);
 
   return {
     content: [
@@ -123,6 +128,17 @@ export async function handleGetConfig(context: ConfigHandlerContext) {
     ],
   };
   });
+}
+
+function formatCustomModsSummary(state: CustomModsState): string {
+  const groups = state.groups.filter((g) => g.lines.length > 0);
+  let output = `\n=== Custom Modifiers (config set "${state.configSetTitle}") ===\n`;
+  if (groups.length === 0) return output + "None. Use set_custom_mods to add some.\n";
+  for (const g of groups) {
+    output += `[group ${g.index}] ${g.title}${g.enabled ? '' : ' (disabled)'}\n`;
+    for (const line of g.lines) output += `  ${line.text}${line.supported ? '' : '  (not parsed by PoB)'}\n`;
+  }
+  return output;
 }
 
 /**

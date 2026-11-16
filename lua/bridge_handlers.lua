@@ -263,6 +263,26 @@ return function(BuildOps, Compat, host)
   handlers.compare_buy_similar = op(BuildOps.compare_buy_similar, 'result')
   handlers.compare_copy = op(BuildOps.compare_copy, 'result')
 
+  -- Skills tab, config tab and minions (gem DPS ranking, skill and config sets,
+  -- spectres, the main skill's minion, custom modifiers).
+  handlers.rank_gems_by_dps = op(BuildOps.rank_gems_by_dps, 'result')
+  handlers.list_skill_sets = op(BuildOps.list_skill_sets, 'result')
+  handlers.select_skill_set = op(BuildOps.select_skill_set, 'result')
+  handlers.create_skill_set = op(BuildOps.create_skill_set, 'result')
+  handlers.rename_skill_set = op(BuildOps.rename_skill_set, 'result')
+  handlers.delete_skill_set = op(BuildOps.delete_skill_set, 'result')
+  handlers.list_config_sets = op(BuildOps.list_config_sets, 'result')
+  handlers.select_config_set = op(BuildOps.select_config_set, 'result')
+  handlers.create_config_set = op(BuildOps.create_config_set, 'result')
+  handlers.rename_config_set = op(BuildOps.rename_config_set, 'result')
+  handlers.delete_config_set = op(BuildOps.delete_config_set, 'result')
+  handlers.list_spectres = op(BuildOps.list_spectres, 'result')
+  handlers.set_spectres = op(BuildOps.set_spectres, 'result')
+  handlers.get_minion_options = op(BuildOps.get_minion_options, 'result')
+  handlers.set_minion = op(BuildOps.set_minion, 'result')
+  handlers.get_custom_mods = op(BuildOps.get_custom_mods, 'result')
+  handlers.set_custom_mods = op(BuildOps.set_custom_mods, 'result')
+
   handlers.get_capabilities = function()
     -- quit ends the stdio bridge's read loop; the desktop app's server has no such loop.
     local actions = host.mode == 'vanilla' and { 'quit' } or {}

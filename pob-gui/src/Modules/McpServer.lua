@@ -36,6 +36,9 @@ local MODIFIES_BUILD = {
   create_spec = true, delete_spec = true, rename_spec = true, select_item_set = true,
   set_socket_group_enabled = true, import_character = true,
 }
+-- Compare tab: copying a tree, item or config from a compared build changes the
+-- open build. The other compare_* actions change only the Compare tab's list.
+MODIFIES_BUILD.compare_copy = true
 -- Actions that work without a build open.
 local NO_BUILD_NEEDED = { ping = true, version = true, get_capabilities = true, gui_status = true,
   new_build = true, load_build_xml = true, open_build = true, show_panel = true,

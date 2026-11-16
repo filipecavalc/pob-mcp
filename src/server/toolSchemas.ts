@@ -365,6 +365,19 @@ export function getLuaToolSchemas(): ToolSchema[] {
       },
     },
     {
+      name: "pob_show",
+      description: "Show text to the user inside the Path of Building desktop window, in its MCP tab (next to Compare in the sidebar): an upgrade table, a comparison, notes. Works whichever engine runs the other tools, when POB_GUI_PATH is configured and the window with the MCP server is running. Replaces the previous panel. PoB colour codes work: ^7 white, ^8 grey, ^1 red, ^2 green, ^3 blue, ^4 yellow, ^xRRGGBB any colour; lines are plain text, one per newline, so align columns with spaces. Prefer ASCII: PoB's font may not draw accented or other non-ASCII characters.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Panel title (default: MCP)." },
+          text: { type: "string", description: "Panel body; newlines separate lines; PoB colour codes allowed. Max 64 KB and 1000 lines." },
+          focus: { type: "boolean", description: "Open the MCP tab in the window (default true).", default: true },
+        },
+        required: ["text"],
+      },
+    },
+    {
       name: "pob_target",
       description: "Show or choose which Path of Building engine runs the lua_* and build tools: the Path of Building desktop window (the build the user sees, when POB_GUI_PATH is configured and the window with the MCP server is running) or the headless engine. Without target, reports the engine in use, whether the window is reachable, the build open in it and whether it has unsaved changes. With target, switches engines; the new engine has its own build, so open or load one afterwards. The engine never switches by itself mid-session: if the window stops answering (minimised windows do not process), tool calls fail with an explanation instead.",
       inputSchema: {

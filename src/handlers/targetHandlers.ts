@@ -4,6 +4,21 @@ import type { PoBTarget, TargetStatus } from "../server/luaClientManager.js";
 export interface TargetContext {
   targetStatus: () => Promise<TargetStatus>;
   selectTarget: (target: PoBTarget) => Promise<TargetStatus>;
+  showPanel: (title: string, text: string, focus?: boolean) => Promise<{ lines: number; shown: boolean; truncated?: boolean }>;
+}
+
+export async function handlePobShow(context: TargetContext, args: { title?: string; text?: string; focus?: boolean }) {
+  return wrapHandler('show in the Path of Building window', async () => {
+    if (typeof args.text !== 'string' || args.text.trim() === '') throw new Error('text is required');
+    const result = await context.showPanel(args.title || 'MCP', args.text, args.focus !== false);
+    const where = result.shown
+      ? 'and opened the MCP tab'
+      : args.focus === false
+        ? '(tab not opened)'
+        : '(the MCP tab could not be opened, e.g. no build is open; the user can click MCP in the sidebar once one is)';
+    const cut = result.truncated ? ' The text was cut at the line limit.' : '';
+    return { content: [{ type: "text" as const, text: `Sent ${result.lines} line${result.lines === 1 ? '' : 's'} to the MCP tab in Path of Building ${where}.${cut}` }] };
+  });
 }
 
 const label = (t: string | null | undefined) =>

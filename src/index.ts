@@ -294,6 +294,7 @@ class PoBMCPServer {
           luaTargets: this.luaClientManager.isEnabled() ? {
             targetStatus: () => this.luaClientManager.targetStatus(),
             selectTarget: (target) => this.luaClientManager.selectTarget(target),
+            showPanel: (title, text, focus) => this.luaClientManager.showPanel(title, text, focus),
           } : undefined,
         };
 

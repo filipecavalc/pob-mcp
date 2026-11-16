@@ -121,6 +121,26 @@ export class LuaClientManager {
   }
 
   /**
+   * Show text in the window's MCP tab, whichever engine runs the tools: the
+   * active connection when it is the window, else a short-lived one.
+   */
+  async showPanel(title: string, text: string, focus = true): Promise<{ lines: number; shown: boolean; truncated: boolean }> {
+    if (!this.guiConfig) {
+      throw new Error('The Path of Building desktop target is not configured: set POB_GUI_PATH (or POB_GUI_TOKEN_FILE) in the server env.');
+    }
+    if (this.client instanceof PoBGuiApiClient && this.client.isAlive()) {
+      return this.client.showPanel(title, text, focus);
+    }
+    const once = new PoBGuiApiClient({ ...this.guiConfig, connectTimeoutMs: 1500 });
+    try {
+      await once.start();
+      return await once.showPanel(title, text, focus);
+    } finally {
+      await once.stop();
+    }
+  }
+
+  /**
    * Switch engines explicitly. The build loaded in the old engine stays there:
    * the caller must load or open a build in the new one.
    */

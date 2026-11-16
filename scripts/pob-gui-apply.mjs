@@ -2,9 +2,11 @@
 // Apply this repo's Path of Building desktop additions to a PoB source tree.
 //
 // PoB is not forked: the additions live in pob-gui/ as new files, the
-// bridge's shared Lua is copied next to them, and one small hook goes into
-// Modules/Main.lua (idempotently, between marker comments). Re-run it after
-// checking out a new PoB release. Nothing is written unless every step can be.
+// bridge's shared Lua is copied next to them, and two small hooks go in
+// idempotently: main:OnFrame in Modules/Main.lua (starts and polls the
+// server) and the tab dispatch in Modules/Build.lua (draws the MCP tab).
+// Re-run it after checking out a new PoB release. Nothing is written unless
+// every step can be.
 //
 // Usage: node scripts/pob-gui-apply.mjs <PathOfBuilding checkout> [--check]
 //   --check  report what would change without writing
@@ -49,6 +51,29 @@ if (!anchor.test(main)) {
 const existingHook = /\t-- pob-mcp: begin[\s\S]*?-- pob-mcp: end\r?\n/;
 const patched = main.replace(existingHook, '').replace(anchor, (m) => m + HOOK.replace(/\n/g, eol) + eol);
 
+// 1b. Plan the Build.lua hook: the tab-content dispatch draws the MCP tab while
+//     it is shown, ahead of PoB's own viewMode branches (the MCP tab never sets
+//     viewMode, which PoB saves into build files).
+const buildLua = path.join(targetSrc, 'Modules', 'Build.lua');
+const build = readFileSync(buildLua, 'utf8');
+const buildEol = build.includes('\r\n') ? '\r\n' : '\n';
+const DISPATCH_MARK = 'self.mcpTab:Draw(tabViewPort, inputEvents) -- pob-mcp';
+let buildPatched = build;
+if (!build.includes(DISPATCH_MARK)) {
+  const dispatch = /^\tif self\.viewMode == "IMPORT" then\r?\n/gm;
+  const matches = build.match(dispatch) || [];
+  if (matches.length !== 1) {
+    console.error(`expected one 'if self.viewMode == "IMPORT" then' line in Modules/Build.lua, found ${matches.length}; PoB changed, update this script. Nothing was written.`);
+    process.exit(1);
+  }
+  buildPatched = build.replace(dispatch, [
+    '\tif self.mcpTab and self.mcpTab.shown then -- pob-mcp',
+    `\t\t${DISPATCH_MARK}`,
+    '\telseif self.viewMode == "IMPORT" then',
+    '',
+  ].join(buildEol));
+}
+
 // 2. Collect files: everything under pob-gui/src, and the shared bridge Lua into src/Modules/PobMcp.
 const overlay = path.join(repoRoot, 'pob-gui', 'src');
 const walk = (dir) => readdirSync(dir).flatMap((name) => {
@@ -76,4 +101,10 @@ if (patched === main) {
 } else {
   console.log(`${checkOnly ? 'would patch' : 'patched'}  src/Modules/Main.lua (OnFrame hook)`);
   if (!checkOnly) writeFileSync(mainLua, patched);
+}
+if (buildPatched === build) {
+  console.log('unchanged  src/Modules/Build.lua (tab hook present)');
+} else {
+  console.log(`${checkOnly ? 'would patch' : 'patched'}  src/Modules/Build.lua (MCP tab dispatch)`);
+  if (!checkOnly) writeFileSync(buildLua, buildPatched);
 }

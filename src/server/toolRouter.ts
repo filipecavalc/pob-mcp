@@ -20,7 +20,7 @@ import { handleFindBestAnointment } from "../handlers/anointHandlers.js";
 import { handleLuaStart, handleLuaStop, handleLuaNewBuild, handleLuaSaveBuild, handleLuaLoadBuild, handleLuaImportCode, handleLuaGetAilments, handleLuaSimulate,
   handleLuaGetStats, handleLuaGetBuildSnapshot, handleLuaGetTree, handleLuaSetTree, handleSearchTreeNodes, handleLuaGetBuildInfo, handleLuaReloadBuild, handleUpdateTreeDelta, handleCreateSpec, handleListSpecs, handleSelectSpec, handleDeleteSpec, handleRenameSpec, handleListItemSets, handleSelectItemSet } from "../handlers/luaHandlers.js";
 import { handleImportCharacter } from "../handlers/characterImportHandlers.js";
-import { handlePobTarget } from "../handlers/targetHandlers.js";
+import { handlePobShow, handlePobTarget } from "../handlers/targetHandlers.js";
 import { handleAddItem, handleGetEquippedItems, handleToggleFlask, handleGetSkillSetup, handleSetMainSkill, handleCreateSocketGroup, handleAddGem, handleSetGemLevel, handleSetGemQuality, handleRemoveSkill, handleRemoveGem, handleSetupSkillWithGems, handleAddMultipleItems, handleSetSocketGroupEnabled, handleSetGemEnabled } from "../handlers/itemSkillHandlers.js";
 import { handleAnalyzeDefenses, handleSuggestOptimalNodes, handleOptimizeTree } from "../handlers/optimizationHandlers.js";
 import { handleAnalyzeItems, handleOptimizeSkillLinks, handleCreateBudgetBuild } from "../handlers/advancedOptimizationHandlers.js";
@@ -169,6 +169,14 @@ export async function routeToolCall(
         args.build_xml as string | undefined,
         args.name as string | undefined
       );
+
+    case "pob_show":
+      if (!deps.luaTargets) throw new Error("PoB Lua Bridge is not enabled. Set POB_LUA_ENABLED=true to use lua_* tools.");
+      return await handlePobShow(deps.luaTargets, {
+        title: args?.title as string | undefined,
+        text: args?.text as string | undefined,
+        focus: args?.focus as boolean | undefined,
+      });
 
     case "pob_target":
       if (!deps.luaTargets) throw new Error("PoB Lua Bridge is not enabled. Set POB_LUA_ENABLED=true to use lua_* tools.");

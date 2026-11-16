@@ -134,6 +134,13 @@ export class PoBGuiApiClient extends PoBLuaApiClient {
     return res.status as Record<string, unknown>;
   }
 
+  /** Put text in the window's MCP tab (show_panel action); PoB colour codes work. */
+  async showPanel(title: string, text: string, focus = true): Promise<{ lines: number; shown: boolean; truncated: boolean }> {
+    const res = await this.send({ action: "show_panel", params: { title, text, focus } });
+    if (!res.ok) throw new Error(res.error || "show_panel failed");
+    return { lines: Number(res.lines) || 0, shown: res.shown === true, truncated: res.truncated === true };
+  }
+
   /** Open a saved build file in the window as PoB's build list does (open_build action). */
   async openBuild(filePath: string, force = false): Promise<Record<string, unknown>> {
     const res = await this.send({ action: "open_build", params: { path: filePath, force } });

@@ -38,7 +38,19 @@ local MODIFIES_BUILD = {
 }
 -- Actions that work without a build open.
 local NO_BUILD_NEEDED = { ping = true, version = true, get_capabilities = true, gui_status = true,
-  new_build = true, load_build_xml = true, open_build = true }
+  new_build = true, load_build_xml = true, open_build = true, show_panel = true }
+
+local LOG_SIZE = 60
+-- TextListControl draws every line each frame (clipped, not culled), so keep panels modest.
+local MAX_PANEL_BYTES = 64 * 1024
+local MAX_PANEL_LINES = 1000
+-- Status polling is not worth a line in the recent-commands list.
+local NOT_LOGGED = { ping = true, version = true, get_capabilities = true, gui_status = true }
+-- Build.lua switches tabs on these Ctrl shortcuts by setting viewMode only.
+local TAB_SHORTCUTS = { ["1"] = true, ["2"] = true, ["3"] = true, ["4"] = true, ["5"] = true, ["6"] = true,
+  ["7"] = true, i = true }
+local TAB_BUTTONS = { "modeImport", "modeNotes", "modeConfig", "modeTree", "modeSkills", "modeItems",
+  "modeCalcs", "modeParty", "modeCompare" }
 
 local Server = {}
 Server.__index = Server
@@ -142,7 +154,22 @@ function Server:Handle(request)
     return { ok = false, error = "no build is open in Path of Building (screen: " .. tostring(main.mode) .. ")" }
   end
 
-  if action == "gui_status" then
+  if action == "show_panel" then
+    -- Text for the MCP tab; PoB colour codes (^7, ^xRRGGBB) work in it.
+    if params.text ~= nil and type(params.text) ~= "string" then return { ok = false, error = "text must be a string" } end
+    local text = params.text or ""
+    if #text > MAX_PANEL_BYTES then return { ok = false, error = "text too long (max " .. MAX_PANEL_BYTES .. " bytes)" } end
+    local lines, truncated = {}, false
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+      if #lines >= MAX_PANEL_LINES then truncated = true break end
+      lines[#lines + 1] = (line:gsub("\r$", ""):gsub("\t", "    "))
+    end
+    self.panel = { title = type(params.title) == "string" and params.title ~= "" and params.title or "MCP", lines = lines, at = os.time() }
+    self.panelVersion = self.panelVersion + 1
+    local shown = false
+    if params.focus ~= false then shown = self:ShowTab(build) end
+    return { ok = true, lines = #lines, truncated = truncated, shown = shown }
+  elseif action == "gui_status" then
     local status = guiStatus(main)
     if status.build then status.build.loadedByMcp = self:Owns(build) end
     return { ok = true, status = status }
@@ -211,8 +238,87 @@ function Server:OnLine(c, line)
   local ok, res = pcall(self.Handle, self, request)
   if not ok then res = { ok = false, error = tostring(res) } end
   if type(res) ~= "table" then res = { ok = false, error = "handler returned no response" } end
+  if not NOT_LOGGED[request.action] then self:Log(request.action, res.ok == true, res.error) end
   c.out = c.out .. encode(res)
   return true
+end
+
+-- Recent commands, shown in the MCP tab.
+function Server:Log(action, ok, err)
+  self.lastRequestAt = os.time()
+  table.insert(self.log, { at = self.lastRequestAt, action = tostring(action), ok = ok,
+    error = err and tostring(err):sub(1, 160) or nil })
+  while #self.log > LOG_SIZE do table.remove(self.log, 1) end
+  self.logVersion = self.logVersion + 1
+end
+
+function Server:ClearPanel()
+  self.panel = nil
+  self.panelVersion = self.panelVersion + 1
+end
+
+-- Returns whether the layer is now up. EnsureTab runs first, so a build
+-- switched earlier in this same frame gets its own tab before it is shown.
+function Server:ShowTab(build)
+  pcall(self.EnsureTab, self)
+  build = openBuild(self.main)
+  if build and build.mcpTab and build.mcpTab.owner == build.treeTab then
+    build.mcpTab.shown = true
+    build.mcpTab.shownOver = build.viewMode
+    build.mcpTab.shownFrame = self.frame
+    return true
+  end
+  return false
+end
+
+-- Give the open build an MCP tab and a sidebar button next to Compare. PoB
+-- recreates a build's controls on every Init (Build.lua wipes them), so this
+-- runs each frame and adds them again when missing. The other tab buttons
+-- are wrapped so that choosing them hides the MCP layer, and they show as
+-- unselected while it is up.
+function Server:EnsureTab()
+  local build = openBuild(self.main)
+  if not build or not build.controls or not build.controls.modeCompare then return end
+  if not build.mcpTab or build.mcpTab.owner ~= build.treeTab then
+    build.mcpTab = new("McpTab", build, self)
+    build.mcpTab.owner = build.treeTab
+  end
+  local tab = build.mcpTab
+  if not build.controls.modeMcp then
+    build.controls.modeMcp = new("ButtonControl", { "LEFT", build.controls.modeCompare, "RIGHT" }, { 4, 0, 72, 20 }, "MCP", function()
+      self:ShowTab(build)
+    end)
+    build.controls.modeMcp.locked = function() return tab.shown end
+    for _, name in ipairs(TAB_BUTTONS) do
+      local button = build.controls[name]
+      if button then
+        local onClick, locked = button.onClick, button.locked
+        button.onClick = function(...)
+          tab.shown = false
+          return onClick(...)
+        end
+        button.locked = function()
+          if tab.shown then return false end
+          if type(locked) == "function" then return locked() end
+          return locked
+        end
+      end
+    end
+  end
+  if not tab.shown then return end
+  -- Anything else that switched tabs hides the layer: a command changing
+  -- viewMode, or a Ctrl shortcut (seen here, before Build.lua handles it,
+  -- which matters when it names the tab already under the layer).
+  if build.viewMode ~= tab.shownOver then tab.shown = false return end
+  if IsKeyDown("CTRL") then
+    for _, event in ipairs(self.main.inputEvents or {}) do
+      if event.type == "KeyDown" and TAB_SHORTCUTS[event.key] then tab.shown = false return end
+    end
+  end
+  -- The layer is drawn by a hook in Build.lua. If that file was replaced (a
+  -- PoB update) the hook is gone: drop the layer rather than leave every tab
+  -- button looking unselected.
+  if (tab.drawnFrame or tab.shownFrame or 0) < self.frame - 3 then tab.shown = false end
 end
 
 -- Send what fits; keep the rest for the next frame.
@@ -267,6 +373,12 @@ function Server:Poll()
   -- ui_main.cpp, Frame). With nobody using the window and nothing else to
   -- do, wait for a request instead of spinning: select wakes at once when
   -- one arrives.
+  self.frame = (self.frame or 0) + 1
+  local tabOk, tabErr = pcall(self.EnsureTab, self)
+  if not tabOk and not self.tabErrorShown then
+    self.tabErrorShown = true
+    ConPrintf("MCP server: could not add the MCP tab: %s", tostring(tabErr))
+  end
   if not self:UserActive() and not self:OtherWorkRunning() then
     local watch = { self.listener }
     for _, c in ipairs(self.clients) do watch[#watch + 1] = c.sock end
@@ -318,7 +430,7 @@ function M.start(main)
   -- The headless bridge advances PoB a frame with runCallback after an import;
   -- here PoB is already inside a frame, and get_main_output recalculates.
   BuildOps.advanceFrame = function() end
-  local server = setmetatable({ main = main, clients = {} }, Server)
+  local server = setmetatable({ main = main, clients = {}, log = {}, logVersion = 0, panelVersion = 0 }, Server)
   local function loaded()
     _G.build = openBuild(main)
     server.ownedTab = _G.build and _G.build.treeTab or nil
@@ -340,7 +452,7 @@ function M.start(main)
   local capabilities = handlers.get_capabilities
   handlers.get_capabilities = function(params)
     local res = capabilities(params)
-    for _, extra in ipairs({ "gui_status", "open_build" }) do table.insert(res.capabilities.actions, extra) end
+    for _, extra in ipairs({ "gui_status", "open_build", "show_panel" }) do table.insert(res.capabilities.actions, extra) end
     table.sort(res.capabilities.actions)
     return res
   end

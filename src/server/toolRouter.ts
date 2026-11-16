@@ -49,6 +49,7 @@ import { handleListCalcBreakdowns, handleGetCalcBreakdown } from "../handlers/ca
 import { handleGetParty, handlePartyImport, handlePartyClear, handlePartyDisableEffects, handlePartyRebuild, handleSetPartyExportSupport } from "../handlers/partyHandlers.js";
 import { handleListBuildFolder, handleCreateBuildFolder, handleRenameBuild, handleMoveBuild, handleCopyBuild, handleDeleteBuild, withOpenBuilds } from "../handlers/buildFolderHandlers.js";
 import { handleGetNodePower, handleFindTimelessJewel, handleListTattoos, handleApplyTattoo, handleRemoveTattoos, type GetNodePowerArgs, type FindTimelessJewelArgs } from "../handlers/treePowerHandlers.js";
+import { handleCraftItemBases, handleCraftItemCreate, handleCraftItemAffixes, handleCraftItemProperties, handleCraftItemAddModifier, handleCraftItemAddImplicit, handleCraftItemCorrupt, handleCraftItemEnchant, handleSearchItemDb, handleManageItemSet, handleListSharedItems } from "../handlers/itemCraftingHandlers.js";
 
 export interface ToolRouterDependencies {
   contextBuilder: ContextBuilder;
@@ -1044,6 +1045,47 @@ export async function routeToolCall(
 
     case "remove_tattoos":
       return await handleRemoveTattoos(luaContext, (args ?? {}) as { node_id?: number; all?: boolean; confirm?: boolean });
+
+    // Items tab: crafting with PoB's own popups, item databases, item sets, shared items.
+    case "craft_item_bases":
+      return await handleCraftItemBases(luaContext, (args ?? {}) as unknown as Parameters<typeof handleCraftItemBases>[1]);
+
+    case "craft_item_create":
+      return await handleCraftItemCreate(luaContext, (args ?? {}) as unknown as Parameters<typeof handleCraftItemCreate>[1]);
+
+    case "craft_item_affixes":
+      if (typeof args?.item_text !== "string") throw new Error("Missing item_text");
+      return await handleCraftItemAffixes(luaContext, args as unknown as Parameters<typeof handleCraftItemAffixes>[1]);
+
+    case "craft_item_properties":
+      if (typeof args?.item_text !== "string") throw new Error("Missing item_text");
+      return await handleCraftItemProperties(luaContext, args as unknown as Parameters<typeof handleCraftItemProperties>[1]);
+
+    case "craft_item_add_modifier":
+      if (typeof args?.item_text !== "string") throw new Error("Missing item_text");
+      return await handleCraftItemAddModifier(luaContext, args as unknown as Parameters<typeof handleCraftItemAddModifier>[1]);
+
+    case "craft_item_add_implicit":
+      if (typeof args?.item_text !== "string") throw new Error("Missing item_text");
+      return await handleCraftItemAddImplicit(luaContext, args as unknown as Parameters<typeof handleCraftItemAddImplicit>[1]);
+
+    case "craft_item_corrupt":
+      if (typeof args?.item_text !== "string") throw new Error("Missing item_text");
+      return await handleCraftItemCorrupt(luaContext, args as unknown as Parameters<typeof handleCraftItemCorrupt>[1]);
+
+    case "craft_item_enchant":
+      if (typeof args?.item_text !== "string") throw new Error("Missing item_text");
+      return await handleCraftItemEnchant(luaContext, args as unknown as Parameters<typeof handleCraftItemEnchant>[1]);
+
+    case "search_item_db":
+      return await handleSearchItemDb(luaContext, (args ?? {}) as unknown as Parameters<typeof handleSearchItemDb>[1]);
+
+    case "manage_item_set":
+      if (typeof args?.action !== "string") throw new Error("Missing action");
+      return await handleManageItemSet(luaContext, args as unknown as Parameters<typeof handleManageItemSet>[1]);
+
+    case "list_shared_items":
+      return await handleListSharedItems(luaContext, (args ?? {}) as unknown as Parameters<typeof handleListSharedItems>[1]);
 
     default:
       throw new Error(`Unknown tool: ${name}`);

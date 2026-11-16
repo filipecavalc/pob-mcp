@@ -29,7 +29,8 @@
     "test:smoke:truthfulness": "node tests/smoke/state-truthfulness.mjs",
     "test:smoke:dossier": "node tests/smoke/dossier-tree.mjs",
     "test:smoke:skills-config": "node tests/smoke/skills-config.mjs",
-    "test:smoke:tree-power": "node tests/smoke/tree-power.mjs"
+    "test:smoke:tree-power": "node tests/smoke/tree-power.mjs",
+    "test:smoke:items-tab": "node tests/smoke/items-tab.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

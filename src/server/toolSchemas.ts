@@ -1688,6 +1688,254 @@ export function getLuaToolSchemas(): ToolSchema[] {
         },
       },
     },
+    // Items tab: crafting with PoB's own popups, item databases, item sets, shared items.
+    ...itemsTabToolSchemas(),
+  ];
+}
+
+/** Arguments every crafting tool shares: hand the result to lua_simulate and/or add_item. */
+const CRAFT_FOLLOW_UP_PROPERTIES = {
+  simulate_slot: {
+    type: "string",
+    description: "Also run lua_simulate with the resulting item in this slot (PoB slot name, e.g. 'Helmet', 'Ring 1'); the build is not changed.",
+  },
+  equip_slot: {
+    type: "string",
+    description: "Also add the resulting item to the build and equip it in this slot (the add_item path). Changes the build.",
+  },
+};
+
+const CRAFT_LIST_PROPERTIES = {
+  sort_by: {
+    type: "string",
+    description: "Sort the list as the popup's 'Sort by' does: PoB calculates each option on this build. A stat key or label from PoB's power list, e.g. FullDPS, CombinedDPS, Life, EnergyShield, TotalEHP, Armour. Without it PoB's Default order is used, whatever the window's own sort is.",
+  },
+  search: { type: "string", description: "Only list options whose label or lines contain this text." },
+  limit: { type: "number", description: "Maximum options to list (default 50, max 500)." },
+};
+
+const ITEM_TEXT_PROPERTY = {
+  type: "string",
+  description: "PoB item text to work on, as the craft_item_* tools return it (or pasted from the game).",
+};
+
+function itemsTabToolSchemas(): ToolSchema[] {
+  return [
+    {
+      name: "craft_item_bases",
+      description: "List the item base types and bases of Path of Building's 'Craft item...' popup (PoB's own base data). Without arguments returns the base types; with base_type or search, the bases with level and implicit. Use the base name with craft_item_create.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          base_type: { type: "string", description: "Base type as PoB lists it, e.g. 'Helmet: Energy Shield', 'Ring', 'Belt', 'One Handed Sword'." },
+          search: { type: "string", description: "Part of a base name, e.g. 'circlet'." },
+          limit: { type: "number", description: "Maximum bases to list (default 100)." },
+        },
+      },
+    },
+    {
+      name: "craft_item_create",
+      description: "Create an item the way Path of Building does and return its item text. With base: PoB's 'Craft item...' (rarity, name, base; magic and rare items get prefix/suffix slots for craft_item_affixes, with the base implicit). With item_text: PoB's 'Create custom...' (PoB parses and normalises the text, e.g. quality, and copies the anoint of the item equipped in that slot as its paste does). Nothing is added to the build unless equip_slot is given. The craft_item_* tools work on the returned text through PoB's own popups and mod pools; list_craftable_mods, find_affix_tiers and suggest_crafting are quicker lookups from the mod tables without an item or build.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          base: { type: "string", description: "Base name as craft_item_bases lists it, e.g. 'Hubris Circlet', 'Two-Toned Boots (Armour/Energy Shield)'." },
+          rarity: { type: "string", enum: ["NORMAL", "MAGIC", "RARE", "UNIQUE", "RELIC"], description: "Rarity (default RARE, as PoB's popup). MAGIC and RARE make a crafted item with affix slots; for flasks, charms and tinctures PoB makes RARE into MAGIC." },
+          name: { type: "string", description: "Item name for rare, unique and relic items (default 'New Item')." },
+          item_text: { type: "string", description: "Item text for 'Create custom...' instead of base: the first lines must be the name and base type (rare/unique) or contain the base type (normal/magic). Without a 'Rarity:' line, rarity applies (default RARE)." },
+          ...CRAFT_FOLLOW_UP_PROPERTIES,
+        },
+      },
+    },
+    {
+      name: "craft_item_affixes",
+      description: "Set or list the prefix and suffix slots of an item made with craft_item_create as magic or rare: the Prefix/Suffix dropdowns and roll sliders PoB shows for crafted items, with PoB's own mod pool for the base, its influences and the other affixes (groups already used are excluded). With list, returns the options for one slot, grouped by modifier with every tier (tier 1 = best). With changes, sets slots in order and returns the new item text.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          item_text: ITEM_TEXT_PROPERTY,
+          changes: {
+            type: "array",
+            description: "Slot changes applied in order.",
+            items: {
+              type: "object",
+              properties: {
+                type: { type: "string", enum: ["prefix", "suffix"] },
+                index: { type: "number", description: "Slot number (1-based); default the first empty slot of that type." },
+                modifier: { type: "string", description: "The option: the option's label text (exact, or part of only one label), its id, or \"index:label\" exactly as listed; a bare index is refused because PoB rebuilds and re-sorts its lists. A tier's mod id from the listing picks that tier." },
+                tier: { type: "number", description: "Tier, 1 = best (default 1 when roll is given)." },
+                roll: { type: "number", description: "Roll within the tier, 0-1. Without tier and roll PoB's default slider position is used (the middle of the whole range)." },
+                clear: { type: "boolean", description: "Empty the slot." },
+              },
+              required: ["type"],
+            },
+          },
+          list: { type: "string", enum: ["prefix", "suffix"], description: "List the options for this slot type (after the changes)." },
+          list_index: { type: "number", description: "Which slot to list for (default 1); the options exclude groups used by the other slots." },
+          ...CRAFT_LIST_PROPERTIES,
+          ...CRAFT_FOLLOW_UP_PROPERTIES,
+        },
+        required: ["item_text"],
+      },
+    },
+    {
+      name: "craft_item_properties",
+      description: "Change the item controls Path of Building shows under an item: the two influence dropdowns (Shaper, Elder, Crusader, Redeemer, Hunter, Warlord, and Searing Exarch / Eater of Worlds on armour, which unlock craft_item_add_implicit's eldritch implicits), quality, catalyst and catalyst quality (amulets, rings, belts), a crafted cluster jewel's skill and passive count, the roll of each ranged line, and the Remove button of crafted and custom modifiers. Without changes, lists what can be set for this item.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          item_text: ITEM_TEXT_PROPERTY,
+          influences: { type: "array", items: { type: "string" }, description: "Up to two influences; [] removes them." },
+          quality: { type: "number", description: "Item quality." },
+          catalyst: { type: "string", description: "Catalyst name, e.g. 'Fertile', 'Prismatic'." },
+          catalyst_quality: { type: "number", description: "Catalyst quality (PoB sets 20 when a catalyst is first chosen)." },
+          cluster_skill: { type: "string", description: "Cluster jewels crafted in PoB: the cluster skill (e.g. 'Fire Damage'); its notables then show up in craft_item_affixes." },
+          cluster_node_count: { type: "number", description: "Cluster jewels crafted in PoB: number of added passives." },
+          ranges: {
+            type: "array",
+            description: "Roll of ranged lines, as PoB's range slider.",
+            items: {
+              type: "object",
+              properties: {
+                line: { type: "string", description: "The line: the option's label text (exact, or part of only one label), its id, or \"index:label\" exactly as listed; a bare index is refused because PoB rebuilds and re-sorts its lists." },
+                roll: { type: "number", description: "0-1." },
+              },
+              required: ["line", "roll"],
+            },
+          },
+          remove_modifiers: { type: "array", items: { type: "string" }, description: "Crafted or custom modifiers to remove: the option's label text (exact, or part of only one label), its id, or \"index:label\" exactly as listed; a bare index is refused because PoB rebuilds and re-sorts its lists." },
+          ...CRAFT_FOLLOW_UP_PROPERTIES,
+        },
+        required: ["item_text"],
+      },
+    },
+    {
+      name: "craft_item_add_modifier",
+      description: "Path of Building's 'Add modifier...' popup on a magic or rare item: sources Crafting Bench (MASTER), Essence, Veiled, Beastcraft, Necropolis (armour), Delve, Prefix/Suffix (any rollable affix, for items not crafted in PoB) and Custom, each with PoB's own list for this item. In this PoB version the Prefix/Suffix sources fail inside PoB for some items (affixes without a type); the error then says PoB's popup failed. Without modifier, lists the source's options (optionally sorted by PoB's calculation on this build); with modifier, adds it and returns the item text.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          item_text: ITEM_TEXT_PROPERTY,
+          source: { type: "string", description: "Source id or label: MASTER, ESSENCE, VEILED, BEASTCRAFT, NECROPOLIS, DELVE, PREFIX, SUFFIX, CUSTOM (default: the popup's first source)." },
+          modifier: { type: "string", description: "The option: the option's label text (exact, or part of only one label), its id, or \"index:label\" exactly as listed; a bare index is refused because PoB rebuilds and re-sorts its lists." },
+          custom: { type: "string", description: "With source CUSTOM: the modifier line to add." },
+          ...CRAFT_LIST_PROPERTIES,
+          ...CRAFT_FOLLOW_UP_PROPERTIES,
+        },
+        required: ["item_text"],
+      },
+    },
+    {
+      name: "craft_item_add_implicit",
+      description: "Path of Building's 'Add Implicit...' popup: Searing Exarch and Eater of Worlds implicits on normal, magic and rare armour (PoB offers each once the item has that influence: set it with craft_item_properties), Delve implicits, and custom implicit lines. Two steps as in the popup: without group, lists the implicit types; with group, lists that type's modifiers; with modifier, adds it (an eldritch implicit replaces the existing one of the same kind).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          item_text: ITEM_TEXT_PROPERTY,
+          source: { type: "string", description: "EXARCH, EATER, DELVE or CUSTOM (default: the popup's first source)." },
+          group: { type: "string", description: "Implicit type: the option's label text (exact, or part of only one label), its id, or \"index:label\" exactly as listed; a bare index is refused because PoB rebuilds and re-sorts its lists." },
+          modifier: { type: "string", description: "Modifier within the type, same forms." },
+          custom: { type: "string", description: "With source CUSTOM: the implicit line to add." },
+          ...CRAFT_LIST_PROPERTIES,
+          ...CRAFT_FOLLOW_UP_PROPERTIES,
+        },
+        required: ["item_text"],
+      },
+    },
+    {
+      name: "craft_item_corrupt",
+      description: "Path of Building's 'Corrupt...' popup. Source Corrupted: up to two corruption implicits (they replace the item's implicits); without implicits the item is just marked corrupted. Source Scourge: upsides as implicits 1-2 and downsides as 3-4. For unique and relic items, rolls sets the corrupted roll of each line (0.78-1.22, the popup's 'Roll Ranges'). PoB's 'Scourge...' button is disabled in this version; the popup's Scourge source is the same feature. With list, shows the options instead of corrupting.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          item_text: ITEM_TEXT_PROPERTY,
+          source: { type: "string", enum: ["Corrupted", "Scourge"], description: "Default Corrupted." },
+          implicits: { type: "array", items: { type: "string" }, description: "One entry per implicit dropdown in order ('None' skips one): the option's label text (exact, or part of only one label), its id, or \"index:label\" exactly as listed; a bare index is refused because PoB rebuilds and re-sorts its lists. Each pick removes its group from the paired dropdown, as in PoB." },
+          rolls: {
+            type: "array",
+            description: "Unique and relic items: corrupted roll per line.",
+            items: {
+              type: "object",
+              properties: {
+                line: { type: "string", description: "The line, same forms as implicits." },
+                value: { type: "number", description: "0.78-1.22." },
+              },
+              required: ["line", "value"],
+            },
+          },
+          list: { type: "boolean", description: "List the implicit options and roll lines instead of corrupting." },
+          ...CRAFT_LIST_PROPERTIES,
+          ...CRAFT_FOLLOW_UP_PROPERTIES,
+        },
+        required: ["item_text"],
+      },
+    },
+    {
+      name: "craft_item_enchant",
+      description: "Path of Building's 'Change Enchantment...' popup: helmet enchants per skill (by default only the build's skills, as the popup), boot, glove, belt, weapon, body armour and flask enchantments, by source (e.g. Eternal Labyrinth, Harvest, Heist). Without enchantment, lists the options; with enchantment, applies it; remove takes the enchantment off. Anoints are separate: find_best_anointment.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          item_text: ITEM_TEXT_PROPERTY,
+          slot: { type: "number", enum: [1, 2], description: "Enchantment slot (2 only on items that can have two and already have one)." },
+          skill: { type: "string", description: "Helmet enchants: the skill." },
+          all_skills: { type: "boolean", description: "Helmet enchants: list every skill, not only the build's." },
+          source: { type: "string", description: "Enchantment source label or id." },
+          enchantment: { type: "string", description: "The enchantment: the option's label text (exact, or part of only one label), its id, or \"index:label\" exactly as listed; a bare index is refused because PoB rebuilds and re-sorts its lists." },
+          remove: { type: "boolean", description: "Remove the enchantment in this slot." },
+          ...CRAFT_LIST_PROPERTIES,
+          ...CRAFT_FOLLOW_UP_PROPERTIES,
+        },
+        required: ["item_text"],
+      },
+    },
+    {
+      name: "search_item_db",
+      description: "Search Path of Building's unique database or rare templates as the Items tab lists them: PoB's own filters (slot, type, league, requirements, obtainable), search box (anywhere, names or modifiers) and sort (by name or by a stat PoB calculates on this build). With name, returns that item's text (and a chosen legacy variant). Pass the text to add_item (with assume_max_quality, as PoB's database add), lua_simulate or the craft_item_* tools.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          db: { type: "string", enum: ["unique", "rare"], description: "Default unique." },
+          name: { type: "string", description: "Exact item name ('Kaom's Heart' or 'Kaom's Heart, Glorious Plate'); returns its text." },
+          variant: { type: "number", description: "With name: the variant to select (1-based, from the listing)." },
+          slot: { type: "string", description: "Slot filter, e.g. Helmet, Ring, Weapon 1, Jewel, Flask." },
+          item_type: { type: "string", description: "Type filter, e.g. Armour, Jewellery, One Handed Melee, Bow." },
+          league: { type: "string", description: "Uniques: league filter, e.g. 'No league', 'Legion'." },
+          requirement: { type: "string", description: "Uniques: 'Current level', 'Current attributes' or 'Current useable'." },
+          obtainable: { type: "string", description: "Uniques: Obtainable (PoB's default), Any source, Unobtainable, Vendor Recipe, Upgraded, Boss Item, Corruption." },
+          search: { type: "string", description: "Search text (PoB's search box; supports its OR patterns)." },
+          search_mode: { type: "string", enum: ["Anywhere", "Names", "Modifiers"], description: "Default Anywhere." },
+          sort_by: { type: "string", description: "Uniques: sort by a stat PoB calculates with each item equipped (e.g. FullDPS, Life, TotalEHP); default by name." },
+          limit: { type: "number", description: "Maximum items (default 25)." },
+          offset: { type: "number", description: "Skip this many results." },
+          include_text: { type: "boolean", description: "Include each item's text." },
+        },
+      },
+    },
+    {
+      name: "manage_item_set",
+      description: "Create, copy, rename or delete an item set in the loaded build, as Path of Building's 'Manage...' item set list does (list_item_sets and select_item_set list and switch). Deleting keeps the items in the build and needs confirm: true; the last set cannot be deleted.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["create", "copy", "rename", "delete"] },
+          id: { type: "number", description: "Item set id for copy, rename and delete (list_item_sets)." },
+          title: { type: "string", description: "Name for create and rename; for copy, the copy's name (default the copied set's)." },
+          confirm: { type: "boolean", description: "Required as true to delete." },
+        },
+        required: ["action"],
+      },
+    },
+    {
+      name: "list_shared_items",
+      description: "Read Path of Building's shared items and shared item sets, which PoB keeps in its settings for every build. Only the desktop window target has the user's own; the headless engine reads no user settings, so it returns none. Read only.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          include_text: { type: "boolean", description: "Include each item's text." },
+        },
+      },
+    },
   ];
 }
 

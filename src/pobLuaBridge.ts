@@ -365,6 +365,12 @@ export interface CalcWithParams {
   assumeMaxQuality?: boolean;
 }
 
+/** Bridge actions behind the Items tab tools (see PoBLuaApiClient.itemsTabAction). */
+export type ItemsTabAction =
+  | "item_craft_bases" | "item_craft_create" | "item_craft_affixes" | "item_craft_properties"
+  | "item_add_modifier" | "item_add_implicit" | "item_corrupt" | "item_enchant"
+  | "search_item_db" | "item_set_manage" | "list_shared_items" | "items_tab_state" | "items_tab_show_item";
+
 export class PoBLuaApiClient {
   private loadedFilePath?: string;
   private buildGeneration = 0;
@@ -1042,6 +1048,18 @@ async setTree(params: {
     const res = await this.send({ action: "party_set_export_support", params: { enabled } });
     if (!res.ok) throw new Error(res.error || "party_set_export_support failed");
     return res.result as { exportSupport: boolean; exports: Record<string, string> };
+  }
+
+  /**
+   * Items tab actions (lua/pob_ops.lua): the crafting popups, the unique and
+   * rare template databases, item set management and the shared item lists.
+   * Only item_set_manage changes the build; the crafting actions take item
+   * text and return item text.
+   */
+  async itemsTabAction<T>(action: ItemsTabAction, params: Record<string, unknown>): Promise<T> {
+    const res = await this.send({ action, params });
+    if (!res.ok) throw new Error(res.error || `${action} failed`);
+    return res.result as T;
   }
 
   async stop(): Promise<void> {

@@ -300,6 +300,21 @@ return function(BuildOps, Compat, host)
   handlers.apply_tattoo = op(BuildOps.apply_tattoo, 'result')
   handlers.remove_tattoos = op(BuildOps.remove_tattoos, 'result')
 
+  -- Items tab: crafting, item databases, item sets, shared items.
+  handlers.item_craft_bases = op(BuildOps.item_craft_bases, 'result')
+  handlers.item_craft_create = op(BuildOps.item_craft_create, 'result')
+  handlers.item_craft_affixes = op(BuildOps.item_craft_affixes, 'result')
+  handlers.item_craft_properties = op(BuildOps.item_craft_properties, 'result')
+  handlers.item_add_modifier = op(BuildOps.item_add_modifier, 'result')
+  handlers.item_add_implicit = op(BuildOps.item_add_implicit, 'result')
+  handlers.item_corrupt = op(BuildOps.item_corrupt, 'result')
+  handlers.item_enchant = op(BuildOps.item_enchant, 'result')
+  handlers.search_item_db = op(BuildOps.search_item_db, 'result')
+  handlers.item_set_manage = op(BuildOps.item_set_manage, 'result')
+  handlers.list_shared_items = op(BuildOps.list_shared_items, 'result')
+  handlers.items_tab_state = op(BuildOps.items_tab_state, 'result')
+  handlers.items_tab_show_item = op(BuildOps.items_tab_show_item, 'result')
+
   handlers.get_capabilities = function()
     -- quit ends the stdio bridge's read loop; the desktop app's server has no such loop.
     local actions = host.mode == 'vanilla' and { 'quit' } or {}

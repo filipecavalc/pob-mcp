@@ -299,6 +299,81 @@ export function getToolSchemas(): ToolSchema[] {
         required: ["search"],
       },
     },
+    // Build folder management (PoB's build list); paths are relative to the builds directory
+    {
+      name: "list_build_folder",
+      truncatable: true,
+      description: "List one folder of the builds directory as PoB's build list shows it: subfolders first, then builds with level, class and last edit. With a filter, searches all subfolders as PoB's search box does ('class:x' matches class or ascendancy).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Folder relative to the builds directory (default: the builds directory itself)." },
+          filter: { type: "string", description: "Search terms, all of which must match a build or folder name, class, ascendancy or folder path; 'class:chieftain' matches class or ascendancy only." },
+          sort: { type: "string", enum: ["NAME", "CLASS", "EDITED", "LEVEL"], description: "Sort order, as PoB's sort dropdown. Default NAME." },
+        },
+      },
+    },
+    {
+      name: "create_build_folder",
+      description: "Create a folder in the builds directory (PoB's New Folder). Refuses an existing name.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "The new folder's name; \\ / : * ? \" < > | are not allowed." },
+          path: { type: "string", description: "Folder to create it in, relative to the builds directory (default: the builds directory)." },
+        },
+        required: ["name"],
+      },
+    },
+    {
+      name: "rename_build",
+      description: "Rename a build or folder in place (PoB's Rename). Refuses a name another build or folder already has.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "The build (with or without .xml) or folder, relative to the builds directory, e.g. 'Leagues/RF atual'." },
+          new_name: { type: "string", description: "The new name, without folder; for a build, .xml is added." },
+        },
+        required: ["path", "new_name"],
+      },
+    },
+    {
+      name: "move_build",
+      description: "Move a build or folder to another folder (PoB's cut and paste, or drag onto a folder). A build whose name is taken there gets PoB's '[2]' style name; a folder whose name is taken there is refused, and a folder cannot move into itself.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "The build or folder to move, relative to the builds directory." },
+          to_folder: { type: "string", description: "Destination folder relative to the builds directory; empty for the builds directory itself." },
+        },
+        required: ["path"],
+      },
+    },
+    {
+      name: "copy_build",
+      description: "Copy a build or folder (PoB's Copy, or copy and paste into another folder). Within the same folder new_name is required; into another folder the copy keeps its name, or gets PoB's '[2]' style name when a build of that name exists. Never overwrites.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "The build or folder to copy, relative to the builds directory." },
+          new_name: { type: "string", description: "Name for the copy (without .xml)." },
+          to_folder: { type: "string", description: "Folder to copy into, relative to the builds directory (default: the same folder)." },
+        },
+        required: ["path"],
+      },
+    },
+    {
+      name: "delete_build",
+      description: "Permanently delete a build or a folder with everything in it (PoB's Delete). Cannot be undone. Without confirm: true it only says what would be deleted.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "The build or folder to delete, relative to the builds directory." },
+          confirm: { type: "boolean", description: "Must be true to delete." },
+        },
+        required: ["path"],
+      },
+    },
   ];
 }
 
@@ -1417,6 +1492,86 @@ export function getLuaToolSchemas(): ToolSchema[] {
           enabled: { type: "boolean", description: "Enable or disable the group" },
           confirm: { type: "boolean", description: "Must be true with remove_group" },
         },
+      },
+    },
+    // Calcs tab breakdowns and Party tab
+    {
+      name: "list_calc_breakdowns",
+      truncatable: true,
+      description: "List the stats of PoB's Calcs tab for the loaded build: every cell the tab shows (section, row, column, the value it displays) with its id and the breakdown it opens. Use it to find the name to pass to get_calc_breakdown.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          filter: { type: "string", description: "Only cells whose id, output key, breakdown key or labels contain this text (e.g. 'resist', 'life', 'dps')." },
+          minion: { type: "boolean", description: "Show the main skill's minion instead of the player (the tab's 'Show Minion Stats')." },
+          mode: { type: "string", enum: ["UNBUFFED", "BUFFED", "COMBAT", "EFFECTIVE"], description: "Calculation mode for this read (the tab's 'Calculation Mode'); the build's own setting, usually EFFECTIVE, is restored afterwards." },
+          include_hidden: { type: "boolean", description: "Also list cells the tab hides for this build (they have no breakdown). Default false." },
+        },
+      },
+    },
+    {
+      name: "get_calc_breakdown",
+      truncatable: true,
+      description: "Where a stat's number comes from, as PoB's Calcs tab breakdown shows it when you hover the stat: the formula lines, and the tables of sources and modifiers (value, stat, notes, source, source name). The rows are PoB's own. Examples: 'Life', 'FireResist', 'Armour', 'TotalDPS', 'TotalDot', 'FireMaximumHitTaken', 'Total Increased' with section 'Life', or an id from list_calc_breakdowns.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          stat: { type: "string", description: "A cell id from list_calc_breakdowns, an output or breakdown key (e.g. 'Life', 'FireResist', 'PhysicalMaximumHitTaken'), or a row label (e.g. 'Total Base')." },
+          section: { type: "string", description: "Calcs tab section or subsection to search in when a label repeats (e.g. 'Life', 'Armour', 'Resist', 'Maximum Hit Taken')." },
+          minion: { type: "boolean", description: "Break down the minion's stat instead of the player's." },
+          mode: { type: "string", enum: ["UNBUFFED", "BUFFED", "COMBAT", "EFFECTIVE"], description: "Calculation mode for this read; the build's own setting is restored afterwards." },
+        },
+        required: ["stat"],
+      },
+    },
+    {
+      name: "get_party",
+      description: "Show PoB's Party tab for the loaded build: the auras, aura debuffs, curses, warcries, links, party member stats and enemy conditions/modifiers imported from other players' builds that apply to the calculation, and the imported text the tab keeps.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "party_import",
+      description: "Import another build's support effects into the loaded build's Party tab, as PoB's Party tab Import does: its auras, curses, warcries, links, party member stats and enemy conditions/modifiers then apply to the calculation. The source must have been saved or exported with 'Export Support' on (set_party_export_support). Reports the stats that changed. Changes the loaded build; save it to keep.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          code: { type: "string", description: "A PoB build code (Import/Export 'Generate') of the supporting build. Build site links are not downloaded." },
+          build_name: { type: "string", description: "A build file in the builds directory to import from, instead of a code." },
+          xml: { type: "string", description: "The supporting build's XML, instead of a code." },
+          destination: { type: "string", enum: ["All", "Party Member Stats", "Aura", "Curse", "Warcry Skills", "Link Skills", "EnemyConditions", "EnemyMods"], description: "Which part to import (the tab's destination dropdown). Default All." },
+          append: { type: "boolean", description: "Append to what the tab already holds instead of replacing it (the tab's Append box; curses and links still replace). Default false." },
+        },
+      },
+    },
+    {
+      name: "party_clear",
+      description: "PoB's Party tab Clear: empty the imported party data for a destination (default All). Like PoB, it also drops the parsed enemy conditions and modifiers. Changes the loaded build.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          destination: { type: "string", enum: ["All", "Party Member Stats", "Aura", "Curse", "Warcry Skills", "Link Skills", "EnemyConditions", "EnemyMods"], description: "What to clear. Default All." },
+        },
+      },
+    },
+    {
+      name: "party_disable_effects",
+      description: "PoB's Party tab 'Disable Party Effects': stop the imported party effects from applying, keeping the imported text (party_rebuild applies it again). Changes the loaded build.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "party_rebuild",
+      description: "PoB's Party tab 'Rebuild All': parse all the imported party text again and apply it. Changes the loaded build.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "set_party_export_support",
+      description: "Turn PoB's 'Export Support' (Import/Export tab) on or off for the loaded build. When on, the build's saved file or code carries its auras, curses, warcries, links and enemy modifiers for another build's Party tab (party_import). Shows what it would export. Changes the loaded build.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          enabled: { type: "boolean", description: "true to export support effects, false to stop." },
+        },
+        required: ["enabled"],
       },
     },
   ];

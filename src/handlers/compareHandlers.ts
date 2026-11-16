@@ -11,9 +11,9 @@
  * compare_builds and compare_trees are separate, older tools: they load or
  * parse two build files on their own and do not use the Compare tab.
  */
+import { decodeBuildCode as decodeSharedBuildCode } from "../utils/buildCode.js";
 import fs from "fs/promises";
 import path from "path";
-import zlib from "zlib";
 import { wrapHandler, noteIgnoredError } from "../utils/errorHandling.js";
 import { resolveBuildFile } from "../utils/pathSanitizer.js";
 import type { LuaHandlerContext } from "./luaHandlers.js";
@@ -42,18 +42,11 @@ async function client(context: LuaHandlerContext): Promise<PoBLuaApiClient> {
  * engine may lack a real Inflate (see PoBLuaApiClient.importCode).
  */
 export function decodeBuildCode(code: string): string {
-  const trimmed = code.trim();
-  if (!trimmed) throw new Error("build_code is empty");
-  const compressed = Buffer.from(trimmed.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+  if (!code.trim()) throw new Error("build_code is empty");
   try {
-    return zlib.inflateSync(compressed).toString("utf8");
-  } catch (zlibErr) {
-    try {
-      return zlib.inflateRawSync(compressed).toString("utf8");
-    } catch {
-      const msg = zlibErr instanceof Error ? zlibErr.message : String(zlibErr);
-      throw new Error(`Invalid build code: ${msg}`);
-    }
+    return decodeSharedBuildCode(code);
+  } catch (error) {
+    throw new Error(`Invalid build code: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

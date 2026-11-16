@@ -684,7 +684,10 @@ export class PoBLuaApiClient {
     // A failed import may already have closed the previous native build.
     this.loadedFilePath = undefined;
     this.buildGeneration++;
-    const res = await this.send({ action: "load_build_xml", params: { xml, name } });
+    // PoB reads build files in text mode (buildMode:LoadDBFile, io.open "r"),
+    // so on Windows it never sees the CRLF its own saves write. Multi-line
+    // text such as the Party tab's imported buffs breaks on a stray "\r".
+    const res = await this.send({ action: "load_build_xml", params: { xml: xml.replace(/\r\n/g, "\n"), name } });
     if (!res.ok) throw new Error(res.error || "load_build_xml failed");
     this.loadedFilePath = sourcePath ? path.resolve(sourcePath) : undefined;
     return { ok: true };
@@ -983,6 +986,57 @@ async setTree(params: {
     const res = await this.send({ action: "select_item_set", params: { id } });
     if (!res.ok) throw new Error(res.error || "select_item_set failed");
     return res.result as ItemSetList;
+  }
+
+  // Calcs tab breakdowns and Party tab (M.list_calc_breakdowns ... M.party_set_export_support).
+
+  async listCalcBreakdowns(params: CalcViewParams & { filter?: string; includeHidden?: boolean } = {}): Promise<CalcBreakdownList> {
+    const res = await this.send({ action: "list_calc_breakdowns", params });
+    if (!res.ok) throw new Error(res.error || "list_calc_breakdowns failed");
+    return res.result as CalcBreakdownList;
+  }
+
+  async getCalcBreakdown(params: CalcViewParams & { stat: string; section?: string }): Promise<CalcBreakdownResult> {
+    const res = await this.send({ action: "get_calc_breakdown", params });
+    if (!res.ok) throw new Error(res.error || "get_calc_breakdown failed");
+    return res.result as CalcBreakdownResult;
+  }
+
+  async getParty(): Promise<PartyState> {
+    const res = await this.send({ action: "party_get" });
+    if (!res.ok) throw new Error(res.error || "party_get failed");
+    return res.result as PartyState;
+  }
+
+  /** PoB's Party tab Import button, given a decoded build XML that carries a party export. */
+  async partyImport(params: { xml: string; destination?: PartyDestination; append?: boolean }): Promise<PartyState & { exportedSections?: string[] }> {
+    const res = await this.send({ action: "party_import", params });
+    if (!res.ok) throw new Error(res.error || "party_import failed");
+    return res.result as PartyState & { exportedSections?: string[] };
+  }
+
+  async partyClear(destination?: PartyDestination): Promise<PartyState> {
+    const res = await this.send({ action: "party_clear", params: { destination } });
+    if (!res.ok) throw new Error(res.error || "party_clear failed");
+    return res.result as PartyState;
+  }
+
+  async partyDisableEffects(): Promise<PartyState> {
+    const res = await this.send({ action: "party_disable_effects" });
+    if (!res.ok) throw new Error(res.error || "party_disable_effects failed");
+    return res.result as PartyState;
+  }
+
+  async partyRebuild(): Promise<PartyState> {
+    const res = await this.send({ action: "party_rebuild" });
+    if (!res.ok) throw new Error(res.error || "party_rebuild failed");
+    return res.result as PartyState;
+  }
+
+  async setPartyExportSupport(enabled: boolean): Promise<{ exportSupport: boolean; exports: Record<string, string> }> {
+    const res = await this.send({ action: "party_set_export_support", params: { enabled } });
+    if (!res.ok) throw new Error(res.error || "party_set_export_support failed");
+    return res.result as { exportSupport: boolean; exports: Record<string, string> };
   }
 
   async stop(): Promise<void> {
@@ -1295,3 +1349,95 @@ export interface SetCustomModsParams {
   appendMod?: string;
   enabled?: boolean;
 }
+
+// ============================================================================
+// Calcs tab breakdowns and Party tab results (lua/pob_ops.lua).
+// ============================================================================
+
+/** The Calcs tab's "Calculation Mode" values (buffModeDropList in CalcsTab.lua). */
+export type CalcMode = 'UNBUFFED' | 'BUFFED' | 'COMBAT' | 'EFFECTIVE';
+
+export interface CalcViewParams {
+  /** Show the main skill's minion instead of the player ("Show Minion Stats"). */
+  minion?: boolean;
+  /** Calculation mode for this read; the build's own setting is restored afterwards. */
+  mode?: CalcMode;
+}
+
+/** One cell of the Calcs tab. */
+export interface CalcCell {
+  /** section/subsection/row/column address; stable for a PoB version. */
+  id: string;
+  section: string;
+  subsection?: string;
+  row?: string;
+  column?: string;
+  /** The text the cell displays; absent when the tab hides the cell for this build. */
+  value?: string;
+  /** The calc output key the cell displays, when it displays one. */
+  outputKey?: string;
+  /** Breakdown tables the cell shows (actor.breakdown keys). */
+  breakdowns: string[];
+  hasBreakdown: boolean;
+  shown: boolean;
+}
+
+interface CalcViewInfo {
+  mode: CalcMode;
+  actor: 'player' | 'minion';
+  haveMinion: boolean;
+  /** The skill the Calcs tab details. */
+  skill?: string;
+}
+
+export interface CalcBreakdownList extends CalcViewInfo {
+  cells: CalcCell[];
+}
+
+/** One part of a breakdown, as CalcBreakdownControl builds it. */
+export type CalcBreakdownSection =
+  | { type: 'text'; lines: string[] }
+  | { type: 'table'; label?: string; footer?: string; columns: string[]; rows: Array<string[]> }
+  | { type: 'radius'; radius: number };
+
+export type CalcBreakdownResult =
+  | (CalcCell & CalcViewInfo & { found: true; sections: CalcBreakdownSection[] })
+  | { found: false; ambiguous?: boolean; candidates: CalcCell[] };
+
+/** partyDestinations in PartyTab.lua. */
+export type PartyDestination = 'All' | 'Party Member Stats' | 'Aura' | 'Curse' | 'Warcry Skills' | 'Link Skills' | 'EnemyConditions' | 'EnemyMods';
+
+export interface PartyEffect {
+  name: string;
+  /** Effect in percent, as PoB's Party tab lists it. */
+  effect?: number;
+  mods: number;
+  isMark?: boolean;
+}
+
+/** PoB's Party tab: the text in its boxes and the effects parsed from it. */
+export interface PartyState {
+  destination?: string;
+  append: boolean;
+  /** This build's own "Export Support" setting (Import/Export tab). */
+  exportSupport: boolean;
+  imported: {
+    partyMemberStats: string; auras: string; curses: string; warcries: string;
+    links: string; enemyConditions: string; enemyMods: string;
+  };
+  active: {
+    auras: PartyEffect[];
+    auraDebuffs: PartyEffect[];
+    extraAuraMods: number;
+    otherEffects: PartyEffect[];
+    curses: PartyEffect[];
+    curseLimit?: number;
+    warcries: PartyEffect[];
+    links: PartyEffect[];
+    /** An empty map arrives as [] (dkjson), which also reads as no entries. */
+    partyMemberStats: Record<string, number>;
+    partyMemberFlags: string[];
+    enemyMods: Array<{ name: string; type: string; value?: number | boolean | string }>;
+  };
+}
+

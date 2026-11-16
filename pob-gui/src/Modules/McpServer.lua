@@ -39,6 +39,9 @@ local MODIFIES_BUILD = {
   select_skill_set = true, create_skill_set = true, rename_skill_set = true, delete_skill_set = true,
   select_config_set = true, create_config_set = true, rename_config_set = true, delete_config_set = true,
   set_spectres = true, set_minion = true, set_custom_mods = true,
+  -- Party tab
+  party_import = true, party_clear = true, party_disable_effects = true, party_rebuild = true,
+  party_set_export_support = true,
 }
 -- Compare tab: copying a tree, item or config from a compared build changes the
 -- open build. The other compare_* actions change only the Compare tab's list.

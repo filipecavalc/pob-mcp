@@ -254,6 +254,19 @@ export class BuildService {
   }
 
   /**
+   * Drop every cached build at absPath or below it. Windows paths compare
+   * case-insensitively, since a build may have been read under another case.
+   */
+  invalidatePathsUnder(absPath: string): void {
+    const fold = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p);
+    const target = fold(path.resolve(absPath));
+    for (const key of Array.from(this.buildCache.keys())) {
+      const k = fold(key);
+      if (k === target || k.startsWith(target + path.sep)) this.buildCache.delete(key);
+    }
+  }
+
+  /**
    * Parse configuration state from a PoB build
    * Extracts active config set, charges, conditions, enemy settings, and multipliers
    */

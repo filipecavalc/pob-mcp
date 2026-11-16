@@ -107,6 +107,17 @@ local function unsavedFlags(build)
   return flags
 end
 
+-- The tabs whose own unsaved flag is set: { tabName = true }.
+local function tabFlags(build)
+  local set = {}
+  for _, tab in ipairs({ "notesTab", "partyTab", "configTab", "treeTab", "skillsTab", "itemsTab", "calcsTab" }) do
+    if build[tab] and build[tab].modFlag then set[tab] = true end
+  end
+  -- The active spec has its own flag (Build.lua computes `unsaved` from it too).
+  if build.spec and build.spec.modFlag then set.spec = true end
+  return set
+end
+
 local function guiStatus(main)
   local build = openBuild(main)
   local status = { mode = main.mode, devMode = launch.devMode == true, version = launch.versionNumber,
@@ -250,6 +261,7 @@ function Server:Handle(request)
   local handler = self.handlers[action]
   if not handler then return { ok = false, error = "unknown action: " .. tostring(action) } end
   local popupsBefore = #main.popups
+  local tabFlagsBefore = build and tabFlags(build) or {}
   local res = handler(params)
   -- TradeQueryGenerator opens a "Please Wait" popup that only its normal finish
   -- closes; drop any popup a command left behind so the window stays usable.
@@ -258,6 +270,19 @@ function Server:Handle(request)
   local changed = MODIFIES_BUILD[action] or (action == "new_build" and (params.className or params.ascendancy))
   if changed and type(res) == "table" and res.ok and _G.build then
     _G.build.modFlag = true
+  end
+  -- PoB's own edit functions (AddUndoState) raise the per-tab flags that
+  -- UserChanges reads as edits made in the UI. On a build this server loaded,
+  -- move the flags this command raised to the build-level flag: the build
+  -- still shows as unsaved, and a later edit in the UI raises its tab's flag
+  -- again, so it still blocks the next load.
+  if _G.build and _G.build == build and self:Owns(build) then
+    for tab in pairs(tabFlags(build)) do
+      if not tabFlagsBefore[tab] then
+        build[tab].modFlag = false
+        build.modFlag = true
+      end
+    end
   end
   return res
 end

@@ -30,7 +30,10 @@
     "test:smoke:dossier": "node tests/smoke/dossier-tree.mjs",
     "test:smoke:skills-config": "node tests/smoke/skills-config.mjs",
     "test:smoke:tree-power": "node tests/smoke/tree-power.mjs",
-    "test:smoke:items-tab": "node tests/smoke/items-tab.mjs"
+    "test:smoke:items-tab": "node tests/smoke/items-tab.mjs",
+    "test:smoke:build-sites": "node tests/smoke/build-sites.mjs",
+    "test:smoke:compare": "node tests/smoke/compare.mjs",
+    "test:smoke:calcs-party": "node tests/smoke/calcs-party.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

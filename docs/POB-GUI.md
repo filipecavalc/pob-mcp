@@ -75,6 +75,10 @@ Server env: `POB_GUI_PATH` (the desktop checkout), optional `POB_TARGET`
 - It never replaces a build with unsaved changes made in the UI, or while a
   dialog is open; changes it makes mark the build unsaved, so PoB asks before
   closing.
+- Actions that open PoB's own dialogs for the length of the call (Items tab
+  crafting, item sets, the timeless jewel finder, the tattoo list, the custom
+  mod search) are refused while you have a dialog open; finish or close it
+  first.
 - Dev Mode normally writes a closing build back to its file unasked; the
   server turns that off (PoB's own "Disable Dev AutoSave" option).
 - Saving without `overwrite` may replace only the file open in the window.

@@ -7,13 +7,17 @@ import { resolve } from 'node:path';
 import { PoBLuaApiClient } from '../../build/pobLuaBridge.js';
 import { gearedBuildXml, smokePoBSrc } from './pobSource.mjs';
 
-// POB_CMD runs the bridge with another interpreter, e.g. on Windows without
-// luajit: POB_CMD=python POB_CMD_ARGS="-I scripts/luajit-win.py".
-const prefix = process.env.POB_CMD ? (process.env.POB_CMD_ARGS || '').split(' ').filter(Boolean).map((arg) => arg.endsWith('.py') ? resolve(arg) : arg) : [];
+// POB_CMD / POB_ARGS work as for the server, e.g. on Windows without luajit:
+// POB_CMD=python POB_ARGS="-I scripts/luajit-win.py lua/vanilla_stdio_bridge.lua".
+// The older POB_CMD_ARGS (the interpreter's arguments only, before the bridge) still works.
+const absolute = (arg) => (/\.(py|lua)$/.test(arg) ? resolve(arg) : arg);
+const args = process.env.POB_ARGS
+  ? process.env.POB_ARGS.split(/\s+/).filter(Boolean).map(absolute)
+  : [...(process.env.POB_CMD ? (process.env.POB_CMD_ARGS || '').split(/\s+/).filter(Boolean).map(absolute) : []), resolve('lua/vanilla_stdio_bridge.lua')];
 const client = new PoBLuaApiClient({
   cwd: smokePoBSrc(),
   cmd: process.env.POB_CMD || undefined,
-  args: [...prefix, resolve('lua/vanilla_stdio_bridge.lua')],
+  args,
   env: { POB_API_STDIO: '0' },
   timeoutMs: 60_000,
 });
